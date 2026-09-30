@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>FeatureVote admin</title>
+<style>
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 1100px; padding: 16px; color: #1f2937; }
+  h1 { font-size: 20px; } h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; } td, th { border-bottom: 1px solid #f1f5f9; padding: 6px; vertical-align: top; text-align: left; }
+  th { font-weight: 600; color: #6b7280; font-size: 12px; }
+  .title { font-weight: 600; } .body { white-space: pre-wrap; color: #4b5563; max-width: 420px; }
+  .muted { color: #6b7280; font-size: 12px; } form.inline { display: inline; margin: 0 4px 4px 0; }
+  input[type=text], input[type=password], textarea, select { font: inherit; padding: 3px 5px; }
+  input.id { width: 64px; } textarea { width: 100%; box-sizing: border-box; }
+  button { font: inherit; padding: 2px 8px; cursor: pointer; } button.danger { color: #b91c1c; }
+  .flash { background: #ecfdf5; border: 1px solid #a7f3d0; padding: 8px; } .error { background: #fef2f2; border: 1px solid #fecaca; padding: 8px; }
+  details { margin-top: 8px; } header { display: flex; justify-content: space-between; align-items: center; }
+</style>
+</head>
+<body>
+{{if not .LoggedIn}}
+  <h1>FeatureVote admin</h1>
+  {{with .Error}}<p class="error">{{.}}</p>{{end}}
+  <form method="post" action="/admin/login">
+    <label>Admin token <input type="password" name="token" autocomplete="current-password" required autofocus></label>
+    <button type="submit">Log in</button>
+  </form>
+{{else}}
+  {{$csrf := .CSRF}}
+  <header>
+    <h1>FeatureVote admin</h1>
+    <form method="post" action="/admin/logout"><input type="hidden" name="csrf" value="{{$csrf}}"><button type="submit">Log out</button></form>
+  </header>
+  {{with .Flash}}<p class="{{if $.FlashError}}error{{else}}flash{{end}}">{{.}}</p>{{end}}
+
+  <h2>Pending ({{len .Pending}})</h2>
+  {{if not .Pending}}<p class="muted">Nothing to moderate.</p>{{else}}
+  <table>
+    <tr><th>#</th><th>Idea</th><th>Author (sub)</th><th>Submitted</th><th>Actions</th></tr>
+    {{range .Pending}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td><div class="title">{{.Title}}</div><div class="body">{{.Body}}</div>
+        <details><summary>Edit</summary>
+          <form method="post" action="/admin/ideas/{{.ID}}/edit">
+            <input type="hidden" name="csrf" value="{{$csrf}}">
+            <input type="text" name="title" value="{{.Title}}" maxlength="120" required style="width:100%;box-sizing:border-box">
+            <textarea name="body" rows="4" maxlength="2000">{{.Body}}</textarea>
+            <button type="submit">Save</button>
+          </form>
+        </details>
+      </td>
+      <td class="muted">{{with deref .AuthorSub}}{{.}}{{else}}—{{end}}</td>
+      <td class="muted">{{date .CreatedAt}}</td>
+      <td>
+        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/approve"><input type="hidden" name="csrf" value="{{$csrf}}"><button type="submit">Approve</button></form>
+        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/reject"><input type="hidden" name="csrf" value="{{$csrf}}"><button type="submit">Reject</button></form>
+        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/merge"><input type="hidden" name="csrf" value="{{$csrf}}"><input class="id" type="number" name="into_id" min="1" placeholder="into #" required><button type="submit">Merge</button></form>
+        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="danger" type="submit">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+
+  <h2>Approved ({{len .Approved}})</h2>
+  {{if not .Approved}}<p class="muted">No approved ideas yet.</p>{{else}}
+  <table>
+    <tr><th>#</th><th>Idea</th><th>Votes</th><th>Status</th><th>Actions</th></tr>
+    {{range .Approved}}
+    {{$status := .Status}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td><div class="title">{{.Title}}</div><div class="body">{{.Body}}</div>
+        <div class="muted">author: {{with deref .AuthorSub}}{{.}}{{else}}—{{end}} · {{date .CreatedAt}}</div>
+        <details><summary>Edit</summary>
+          <form method="post" action="/admin/ideas/{{.ID}}/edit">
+            <input type="hidden" name="csrf" value="{{$csrf}}">
+            <input type="text" name="title" value="{{.Title}}" maxlength="120" required style="width:100%;box-sizing:border-box">
+            <textarea name="body" rows="4" maxlength="2000">{{.Body}}</textarea>
+            <button type="submit">Save</button>
+          </form>
+        </details>
+      </td>
+      <td>▲{{.Up}} ▼{{.Down}} = {{.Score}}</td>
+      <td>
+        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/status">
+          <input type="hidden" name="csrf" value="{{$csrf}}">
+          <select name="status">{{range statuses}}<option value="{{.}}"{{if eq . $status}} selected{{end}}>{{.}}</option>{{end}}</select>
+          <button type="submit">Set</button>
+        </form>
+      </td>
+      <td>
+        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/reject"><input type="hidden" name="csrf" value="{{$csrf}}"><button type="submit">Unpublish</button></form>
+        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/merge"><input type="hidden" name="csrf" value="{{$csrf}}"><input class="id" type="number" name="into_id" min="1" placeholder="into #" required><button type="submit">Merge</button></form>
+        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="danger" type="submit">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+
+  <details>
+    <summary>Rejected ({{len .Rejected}})</summary>
+    <table>
+      {{range .Rejected}}
+      <tr>
+        <td>{{.ID}}</td>
+        <td><div class="title">{{.Title}}</div><div class="body">{{.Body}}</div></td>
+        <td>
+          <form class="inline" method="post" action="/admin/ideas/{{.ID}}/approve"><input type="hidden" name="csrf" value="{{$csrf}}"><button type="submit">Approve</button></form>
+          <form class="inline" method="post" action="/admin/ideas/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="danger" type="submit">Delete</button></form>
+        </td>
+      </tr>
+      {{end}}
+    </table>
+  </details>
+
+  <details>
+    <summary>Merged ({{len .Merged}})</summary>
+    <table>
+      {{range .Merged}}
+      <tr>
+        <td>{{.ID}}</td>
+        <td><div class="title">{{.Title}}</div></td>
+        <td class="muted">merged into #{{with .MergedIntoID}}{{.}}{{end}}</td>
+        <td><form class="inline" method="post" action="/admin/ideas/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="danger" type="submit">Delete</button></form></td>
+      </tr>
+      {{end}}
+    </table>
+  </details>
+
+  <h2>Add an idea (published immediately)</h2>
+  <form method="post" action="/admin/ideas">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <p><input type="text" name="title" maxlength="120" required placeholder="Title" style="width:100%;box-sizing:border-box"></p>
+    <p><textarea name="body" rows="3" maxlength="2000" placeholder="Description (optional)"></textarea></p>
+    <p><select name="status">{{range statuses}}<option value="{{.}}">{{.}}</option>{{end}}</select> <button type="submit">Add</button></p>
+  </form>
+
+  <h2>GDPR: delete user data</h2>
+  <form method="post" action="/admin/users/delete">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <label>User sub <input type="text" name="sub" required></label>
+    <button class="danger" type="submit">Delete votes &amp; anonymise ideas</button>
+    <p class="muted">Deletes every vote by this user and removes them as author of their ideas (the ideas stay).</p>
+  </form>
+{{end}}
+</body>
+</html>

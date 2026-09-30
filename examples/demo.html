@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Acme Monitoring — demo host</title>
+  <style>
+    /* Ordinary host styles. */
+    body { margin: 0; font: 16px/1.5 Georgia, serif; background: #fafaf7; }
+    header, main { max-width: 760px; margin: 0 auto; padding: 16px 20px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 20px; background: #222; }
+    .toolbar a, .toolbar span { color: #fff; }
+    .card { border: 1px solid #ccc; padding: 12px 16px; margin: 12px 0; background: #fff; }
+
+    /* HOSTILE host CSS: proves the widget is isolated by its Shadow DOM. None of this may reach it. */
+    * { font-family: "Comic Sans MS", "Comic Sans", cursive !important; color: red !important; }
+    button { background: lime !important; border: 4px dashed magenta !important; padding: 20px !important; }
+    div { box-sizing: content-box !important; line-height: 3 !important; }
+    ul, li { list-style: square !important; margin: 20px !important; }
+    input, select, textarea { font-size: 30px !important; }
+    h2, h3 { text-transform: uppercase !important; letter-spacing: 4px !important; }
+    #featurevote-root { transform: rotate(3deg); filter: blur(1px); }
+  </style>
+</head>
+<body>
+  <nav class="toolbar" aria-label="Demo identity">
+    <span>Demo identity:</span>
+    <a href="/api/login?as=alice&amp;voter=true">Log in as alice (voter)</a>
+    <a href="/api/login?as=bob&amp;voter=false">Log in as bob (non-voter)</a>
+    <a href="/api/logout">Log out</a>
+    <span id="lang-links">Language:</span>
+  </nav>
+  <header>
+    <h1>Acme Monitoring</h1>
+    <p>This is a fake host application used to demo the FeatureVote widget. The widget button sits in the
+      bottom-right corner. The host page ships deliberately hostile CSS; the widget must look unaffected.</p>
+  </header>
+  <main>
+    <div class="card">
+      <h2>Uptime</h2>
+      <p>All 42 monitors are green. <button type="button" id="open-fv">Open feature ideas</button></p>
+    </div>
+    <div class="card" id="upgrade">
+      <h2>Upgrade</h2>
+      <p>Voting is included in paid plans (this is where <code>data-upgrade-url="#upgrade"</code> points).</p>
+    </div>
+  </main>
+
+  <script>
+    // The widget's data-locale comes from ?lang=, the service origin from ?api= (default
+    // http://localhost:8080), and ?open=1 opens the panel once the widget has loaded.
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var api = q.get('api') || 'http://localhost:8080';
+      var s = document.createElement('script');
+      s.src = api + '/widget.js';
+      s.defer = true;
+      s.dataset.api = api;
+      s.dataset.tokenUrl = '/api/fv-token';
+      s.dataset.loginUrl = '/api/login?as=demo-user-1&voter=true';
+      s.dataset.upgradeUrl = '#upgrade';
+      if (q.get('lang')) s.dataset.locale = q.get('lang');
+      s.dataset.accent = '#0f766e';
+      s.dataset.position = 'bottom-right';
+      s.onload = function () {
+        if (q.get('open') === '1') window.FeatureVote.open();
+      };
+      document.body.appendChild(s);
+
+      document.getElementById('open-fv').addEventListener('click', function () {
+        if (window.FeatureVote) window.FeatureVote.open();
+      });
+
+      var langs = document.getElementById('lang-links');
+      ['en', 'fr', 'de', 'es', 'it', 'zh'].forEach(function (l) {
+        var u = new URL(location.href);
+        u.searchParams.set('lang', l);
+        var a = document.createElement('a');
+        a.href = u.pathname + u.search;
+        a.textContent = l;
+        langs.appendChild(document.createTextNode(' '));
+        langs.appendChild(a);
+      });
+    })();
+  </script>
+</body>
+</html>

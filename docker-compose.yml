@@ -1,0 +1,50 @@
+# Local development stack. ALL SECRETS BELOW ARE DEV-ONLY PLACEHOLDERS.
+#   docker compose up --build
+#   service:   http://localhost:8080   (admin page: http://localhost:8080/admin)
+#   demo host: http://localhost:8090/api/login?as=alice&voter=true
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: featurevote
+      POSTGRES_PASSWORD: featurevote
+      POSTGRES_DB: featurevote
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U featurevote -d featurevote"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  featurevote:
+    build:
+      context: .
+      target: runtime
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FV_DATABASE_URL: postgres://featurevote:featurevote@postgres:5432/featurevote?sslmode=disable
+      FV_HOST_SECRET: dev-only-host-secret-change-me-0123456789
+      FV_HOST_ISSUER: demo
+      FV_ADMIN_TOKEN: dev-only-admin-token-change-me-0123456789
+      FV_ALLOWED_ORIGINS: http://localhost:8090
+      FV_COOKIE_SECURE: "false"
+    ports:
+      - "8080:8080"
+
+  demohost:
+    build:
+      context: .
+      target: demohost
+    depends_on:
+      - featurevote
+    environment:
+      FV_HOST_SECRET: dev-only-host-secret-change-me-0123456789
+      FV_HOST_ISSUER: demo
+    ports:
+      - "8090:8090"
+
+volumes:
+  pgdata:

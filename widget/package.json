@@ -1,0 +1,16 @@
+{
+  "name": "featurevote-widget",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Embeddable FeatureVote widget (built into internal/web/static/widget.js)",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --minify --format=iife --target=es2019 --charset=utf8 --mangle-props=_$ --outfile=../internal/web/static/widget.js \"--banner:js=/*! FeatureVote widget - built from widget/src (npm run build) */\"",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "typescript": "^5.0.0"
+  }
+}

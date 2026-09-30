@@ -1,0 +1,4 @@
+.git
+.env
+bin/
+widget/node_modules/
