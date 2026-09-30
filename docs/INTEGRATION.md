@@ -210,7 +210,7 @@ end
 Rails controller action:
 
 ```ruby
-# config/routes.rb:  get "api/feature-vote/token", to: "feature_vote#token"
+# config/routes.rb (DoLoop, inside the api/v1 namespace):  get "feature_vote/token", to: "feature_vote#token"
 class FeatureVoteController < ApplicationController
   before_action :authenticate_user! # the app's normal auth (bearer token for DoLoop)
 
@@ -257,8 +257,10 @@ only when the server-side config says FeatureVote is enabled.
 
 ### Bearer-token SPA host (DoLoop)
 
-The SPA keeps its access token in `localStorage`, so cookies cannot authenticate the token endpoint. Provide a
-token function instead; it **wins over** `data-token-url`:
+The SPA keeps its access token in `localStorage` and its API lives on another origin (`VITE_API_URL`, e.g.
+`https://api.getdoloop.com/api/v1`), so neither cookies nor a relative `data-token-url` can reach the token
+endpoint. Provide a token function instead; it **wins over** `data-token-url`. DoLoop's endpoint is
+`GET /api/v1/feature_vote/token` (the path is the host's choice; section 3 applies unchanged):
 
 ```html
 <script>
@@ -267,17 +269,25 @@ token function instead; it **wins over** `data-token-url`:
     getToken: async () => {
       const access = localStorage.getItem('access_token');
       if (!access) return null;
-      const res = await fetch('/api/feature-vote/token', { headers: { Authorization: 'Bearer ' + access } });
-      if (!res.ok) return null;
+      const res = await fetch(API_BASE_URL + '/feature_vote/token', {   // API_BASE_URL = VITE_API_URL
+        headers: { Authorization: 'Bearer ' + access },
+      });
+      if (!res.ok) return null;   // 401 (logged out) / 404 (not configured) => anonymous
       return (await res.json()).token;
     },
   };
 </script>
-<script src="https://feedback.doloop.app/widget.js"
+<script src="https://feedback.getdoloop.com/widget.js"
         data-login-url="/login"
-        data-upgrade-text="Voting is available to signed-in users."
+        data-locale="de"
         defer></script>
 ```
+
+In a Vue/Vite app, prefer calling `window.FeatureVote.setTokenProvider(...)` from the auth store (below) over a
+global inline script, and reuse the app's axios client so its 401-refresh interceptor applies. Any
+`data-*-text` override is user-facing copy: pass an already-localized string from the host's i18n, never a
+hard-coded English literal. (DoLoop mints `voter: true` for every signed-in user today, so the upgrade CTA
+never shows there and needs no override.)
 
 If the provider is only available later (e.g. after the Vue app boots or the user logs in/out):
 
