@@ -1,0 +1,81 @@
+FeatureVote core: review evidence (t_051139d8)
+Repo /home/alex/Documents/FeatureVote, branch feat/core @ 6ced324 (2 commits on top of empty main; no remote, nothing pushed/merged)
+
+== go test -p 1 -count=1 ./... (real Postgres 16.9, 127.0.0.1:5655, own cluster)
+ok  github.com/slash4/featurevote/internal/api        4.079s
+ok  github.com/slash4/featurevote/internal/config     0.004s
+ok  github.com/slash4/featurevote/internal/hosttoken  0.005s
+84 PASS lines (35 top-level tests + subtests), 0 FAIL, 0 SKIP. gofmt -l: empty. go vet: clean.
+
+== Mutation battery (17 mutations, reviewer-run; tree restored and verified clean after)
+self-vote guard removed                  KILLED by TestSelfVoteForbidden
+voter=false allowed on PUT vote          KILLED by TestNotEligible
+voter=false allowed on POST idea         KILLED by TestNotEligible
+public list shows pending                KILLED by TestRejectedAndMergedInvisible,TestSubmitIdeaIsPendingAndInvisible
+public get shows pending                 KILLED by TestMergeRecount,TestRejectedAndMergedInvisible,TestSubmitIdeaIsPendingAndInvisible,...
+expiry ignored                           KILLED by TestTokenValidation/expired_beyond_skew,TestVerifyFailures/...
+signature ignored                        KILLED by TestTokenValidation/bad_signature,...
+issuer ignored                           KILLED by TestTokenValidation/wrong_iss,...
+merge keeps target-author vote           KILLED by TestMergeRecount
+merge: source vote overrides target      KILLED by TestMergeRecount   (first form survived = equivalent mutant, NOT EXISTS subquery already guards it)
+vote stacks (no upsert)                  KILLED by TestVoteUniquenessSwitchRemove
+submission limit off-by-one              KILLED by TestSubmissionRateLimit
+vote limiter disabled                    KILLED by TestVoteRateLimit
+GDPR keeps author                        KILLED by TestGDPRDelete
+CORS allows any origin                   KILLED by TestCORS
+voting_closed removed                    KILLED by TestVotingClosed
+
+== scripts/e2e-local.sh (builds binary, starts it on a free port vs real Postgres, runs scripts/e2e.sh)
+✓ healthz
+✓ alice submits idea #3 -> 201 pending
+✓ public list does not contain the pending idea
+✓ public GET of pending idea -> 404
+✓ alice's /v1/me shows the idea as pending
+✓ admin approves
+✓ public list contains it with up=0 down=0
+✓ alice self-vote -> 403 own_idea
+✓ bob upvotes -> up=1 score=1
+✓ bob upvotes again -> still up=1 (no stacking)
+✓ bob switches to down -> up=0 down=1 score=-1
+✓ carol (voter=false) vote -> 403 not_eligible
+✓ dave upvotes -> up=1 down=1 score=0
+✓ bob removes vote -> up=1 down=0 score=1
+✓ expired token -> 401 token_expired
+✓ admin sets status planned -> public shows planned
+✓ GDPR delete dave -> score 0
+✓ cleanup: admin deletes idea
+All e2e checks passed
+
+== scripts/verify-ruby-mint.rb (Ruby 3.2.2, jwt 2.10.3 — the INTEGRATION.md Ruby snippet, verified by the Go verifier)
+ok   doc snippet matches (12 lines)
+ok   jwt 2.10.3 header={"alg":"HS256"} sub=usr_7c1e voter=true verified by fvtoken
+ok   jwt 2.10.3 header={"alg":"HS256"} sub=usr_d00d voter=false verified by fvtoken
+ok   wrong-secret token rejected
+PASS
+(The Go snippet in the doc is compiled and checked by internal/hosttoken/example_test.go; a test fails if the doc drifts.)
+
+== Widget (widget/): npm run build -> 38.7kb (39,659 B, 13.9 KB gzip); tsc --noEmit clean; npm test 21/21 pass
+(locale key parity across en/fr/de/es/it/zh, no innerHTML in ui.ts, no hard-coded prose in ui.ts, locale resolution, token refresh/401 retry)
+
+== Real-browser run (headless Chromium, live service + cmd/demohost, seeded German data, hostile host CSS)
+- Clicking downvote on idea 14: API went 4/1/3 -> 4/2/2; clicking again removed it -> 4/1/3. Live region: "Stimme entfernt."
+- Own idea (alice's approved idea): both vote buttons disabled. Shipped idea: both disabled ("Abstimmung beendet").
+- Focus trap: 60 Tab/Shift+Tab presses, 0 escaped the dialog. Esc closes, focus returns to the launcher, aria-expanded=false.
+- 375px, all six locales: document scrollWidth = 375 (no horizontal overflow); de panel is a full-width bottom sheet.
+- A title "<script>alert(1)</script> ..." shows as literal text; 0 <script> elements inside the shadow root.
+- The host CSS (Comic Sans/red !important, lime buttons, rotate+blur on #featurevote-root) does not affect the widget.
+Screenshots (committed): docs/screenshots/de-desktop-voter.png, de-375-voter.png, de-375-nonvoter.png (upgrade CTA),
+de-desktop-anon.png (log-in CTA), de-375-suggest.png (form), zh-375-voter.png
+
+== Not verified
+- Docker: socket permission denied on this host. `docker compose config` parses as valid; the images were never built or run.
+- The committed internal/web/static/widget.js is a build artifact; nothing checks that it matches widget/src (the Docker build
+  rebuilds it from source, so images are always fresh; a local `go build` uses the committed bundle).
+
+== Decisions to note
+- Score computed at read time (COUNT FILTER over votes), not denormalised: cannot drift; merge/GDPR/switch correct by construction.
+- Submission limit counted from the ideas table (durable, advisory-locked per sub); vote limit is an in-memory sliding window per process
+  (fine for one instance per product).
+- Invalid admin transitions -> 400 invalid_input. Removing a vote on shipped/declined ideas is allowed; casting is 409.
+- INTEGRATION.md DoLoop section fixed by the reviewer: DoLoop's API is cross-origin (VITE_API_URL) with Bearer tokens, so the embed uses
+  getToken/setTokenProvider against GET /api/v1/feature_vote/token; the stray hard-coded English data-upgrade-text example was removed.
