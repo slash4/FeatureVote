@@ -80,3 +80,9 @@ as the vote write.
 - The vote rate limiter is in memory, per process — fine because each product runs one instance. The idea
   submission limit is counted in the database.
 - Logs are JSON (`log/slog`), one line per request; tokens and bodies are never logged.
+
+## License
+
+FeatureVote is free software, licensed under the **GNU Affero General Public License v3.0 or later**
+([LICENSE](LICENSE)). If you run a modified version as a network service, the AGPL requires you to offer
+its users the corresponding source code.

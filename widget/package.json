@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Embeddable FeatureVote widget (built into internal/web/static/widget.js)",
-  "license": "UNLICENSED",
+  "license": "AGPL-3.0-or-later",
   "scripts": {
     "build": "esbuild src/index.ts --bundle --minify --format=iife --target=es2019 --charset=utf8 --mangle-props=_$ --outfile=../internal/web/static/widget.js \"--banner:js=/*! FeatureVote widget - built from widget/src (npm run build) */\"",
     "typecheck": "tsc --noEmit",
