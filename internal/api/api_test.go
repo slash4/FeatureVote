@@ -960,6 +960,13 @@ func TestListSortFilterPaging(t *testing.T) {
 	e.mustErr(e.do("GET", "/v1/ideas?status=bogus", "", nil), 400, "invalid_input")
 	e.mustErr(e.do("GET", "/v1/ideas?sort=hot", "", nil), 400, "invalid_input")
 	e.mustErr(e.do("GET", "/v1/ideas?limit=101", "", nil), 400, "invalid_input")
+	// offset is capped at 10000 (deep OFFSET scans are a cheap DoS).
+	if m := e.must(e.do("GET", "/v1/ideas?offset=10000", "", nil), 200).json(t); len(m["ideas"].([]any)) != 0 || m["total"].(float64) != 3 {
+		t.Fatalf("offset=10000 = %v", m)
+	}
+	e.mustErr(e.do("GET", "/v1/ideas?offset=10001", "", nil), 400, "invalid_input")
+	e.mustErr(e.do("GET", "/v1/ideas?offset=99999999999999999999", "", nil), 400, "invalid_input")
+	e.mustErr(e.do("GET", "/v1/ideas?offset=-1", "", nil), 400, "invalid_input")
 	e.mustErr(e.do("GET", "/v1/nope", "", nil), 404, "not_found")
 }
 

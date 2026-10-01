@@ -479,7 +479,7 @@ All JSON. `/v1/*` responses carry `Cache-Control: no-store`. Request bodies are 
 |---------------|------|---------|-------|
 | `GET /healthz` | — | `200 {"status":"ok"}` | `503 {"status":"db_unavailable"}` when the DB ping fails |
 | `GET /widget.js` | — | `200` JS | ETag / `304` |
-| `GET /v1/ideas?sort=top\|new&status=&limit=50&offset=0` | — | `200 {"ideas":[Idea],"total":n}` | approved only; `limit` ≤ 100; top = score, up, newest |
+| `GET /v1/ideas?sort=top\|new&status=&limit=50&offset=0` | — | `200 {"ideas":[Idea],"total":n}` | approved only; `limit` ≤ 100; `offset` ≤ 10000; top = score, up, newest |
 | `GET /v1/ideas/{id}` | — | `200 Idea` | `404` unless approved |
 | `GET /v1/me` | host token | `200 {"voter":b,"votes":[{"idea_id":1,"value":1}],"ideas":[OwnIdea]}` | works with `voter:false` |
 | `GET /v1/me/votes` | host token | `200 {"votes":[...]}` | |

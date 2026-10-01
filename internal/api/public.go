@@ -11,6 +11,11 @@ import (
 	"github.com/slash4/featurevote/internal/store"
 )
 
+// maxListOffset caps ?offset= on the public list: a deep OFFSET still makes
+// Postgres walk and discard every skipped row, so an unauthenticated caller
+// must not be able to request arbitrarily deep pages.
+const maxListOffset = 10000
+
 func (s *Server) handleListIdeas(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	p := store.ListParams{Sort: "top", Limit: 50}
@@ -38,8 +43,8 @@ func (s *Server) handleListIdeas(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := q.Get("offset"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			writeError(w, http.StatusBadRequest, codeInvalidInput, "offset must be a non-negative integer")
+		if err != nil || n < 0 || n > maxListOffset {
+			writeError(w, http.StatusBadRequest, codeInvalidInput, "offset must be 0 to "+strconv.Itoa(maxListOffset))
 			return
 		}
 		p.Offset = n
