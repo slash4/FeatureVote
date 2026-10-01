@@ -465,9 +465,9 @@ All JSON. `/v1/*` responses carry `Cache-Control: no-store`. Request bodies are 
 | `GET /v1/me` | host token | `200 {"voter":b,"votes":[{"idea_id":1,"value":1}],"ideas":[OwnIdea]}` | works with `voter:false` |
 | `GET /v1/me/votes` | host token | `200 {"votes":[...]}` | |
 | `GET /v1/me/ideas` | host token | `200 {"ideas":[OwnIdea]}` | own pending + approved ideas |
-| `POST /v1/ideas` `{"title","body"}` | host token, voter | `201 OwnIdea` (pending) | title 1–120 chars, body ≤ 2000 (trimmed); 5/day |
+| `POST /v1/ideas` `{"title","body"}` | host token, voter | `201 OwnIdea` (pending) | title 1–120 chars, body ≤ 2000 (trimmed; control characters other than newline/tab → `400`); 5/day |
 | `PUT /v1/ideas/{id}/vote` `{"value":1\|-1}` | host token, voter | `200 {"idea":Idea,"my_vote":1\|-1}` | `403 own_idea`, `409 voting_closed` |
-| `DELETE /v1/ideas/{id}/vote` | host token, voter | `200 {"idea":Idea,"my_vote":0}` | idempotent |
+| `DELETE /v1/ideas/{id}/vote` | host token, voter | `200 {"idea":Idea,"my_vote":0}` | idempotent; `409 voting_closed` (scores of shipped/declined ideas are frozen) |
 | `GET /v1/admin/ideas?moderation_state=` | admin | `200 {"ideas":[AdminIdea]}` | |
 | `POST /v1/admin/ideas` | admin | `201 AdminIdea` | |
 | `POST /v1/admin/ideas/{id}/approve` · `/reject` | admin | `200 AdminIdea` | |
@@ -500,7 +500,7 @@ Errors: `{"error":{"code":"<code>","message":"<english developer message>"}}`. M
 | 403 | `own_idea` | voting on your own idea |
 | 403 | `forbidden_origin` | CORS preflight from an origin not in `FV_ALLOWED_ORIGINS` |
 | 404 | `not_found` | unknown idea, or not approved |
-| 409 | `voting_closed` | idea is `shipped` or `declined` |
+| 409 | `voting_closed` | idea is `shipped` or `declined` (cast and remove) |
 | 413 | `payload_too_large` | body > 16 KiB |
 | 429 | `rate_limited` | submit or vote limit; honour `Retry-After` (seconds) |
 | 500 | `internal` | server error |

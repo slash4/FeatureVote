@@ -262,22 +262,26 @@ func (s *Store) CreateApproved(ctx context.Context, title, body, status string) 
 }
 
 // lockVotable locks an idea row (shared) and applies the voting rules common
-// to casting and removing a vote.
-func lockVotable(ctx context.Context, tx pgx.Tx, id int64, sub string) (status string, err error) {
-	var mod string
+// to casting and removing a vote: the idea must be approved, not authored by
+// sub, and not shipped/declined (their scores are frozen).
+func lockVotable(ctx context.Context, tx pgx.Tx, id int64, sub string) error {
+	var mod, status string
 	var author *string
-	err = tx.QueryRow(ctx, `SELECT moderation_state, status, author_sub FROM ideas WHERE id = $1 FOR SHARE`, id).
+	err := tx.QueryRow(ctx, `SELECT moderation_state, status, author_sub FROM ideas WHERE id = $1 FOR SHARE`, id).
 		Scan(&mod, &status, &author)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && mod != ModApproved) {
-		return "", ErrNotFound
+		return ErrNotFound
 	}
 	if err != nil {
-		return "", err
+		return err
 	}
 	if author != nil && *author == sub {
-		return "", ErrOwnIdea
+		return ErrOwnIdea
 	}
-	return status, nil
+	if status == StatusShipped || status == StatusDeclined {
+		return ErrVotingClosed
+	}
+	return nil
 }
 
 // CastVote sets sub's vote on an approved idea to value (+1 or -1). A repeat
@@ -285,29 +289,27 @@ func lockVotable(ctx context.Context, tx pgx.Tx, id int64, sub string) (status s
 func (s *Store) CastVote(ctx context.Context, id int64, sub string, value int) (Idea, error) {
 	var idea Idea
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		status, err := lockVotable(ctx, tx, id, sub)
-		if err != nil {
+		if err := lockVotable(ctx, tx, id, sub); err != nil {
 			return err
-		}
-		if status == StatusShipped || status == StatusDeclined {
-			return ErrVotingClosed
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO votes (idea_id, voter_sub, value) VALUES ($1, $2, $3)
 			ON CONFLICT (idea_id, voter_sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
 			id, sub, value); err != nil {
 			return err
 		}
+		var err error
 		idea, err = getIdea(ctx, tx, id)
 		return err
 	})
 	return idea, err
 }
 
-// RemoveVote deletes sub's vote on an approved idea (idempotent).
+// RemoveVote deletes sub's vote on an approved idea (idempotent). Like
+// CastVote it is refused on shipped/declined ideas.
 func (s *Store) RemoveVote(ctx context.Context, id int64, sub string) (Idea, error) {
 	var idea Idea
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if _, err := lockVotable(ctx, tx, id, sub); err != nil {
+		if err := lockVotable(ctx, tx, id, sub); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM votes WHERE idea_id = $1 AND voter_sub = $2`, id, sub); err != nil {

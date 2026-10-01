@@ -511,6 +511,27 @@ func TestVotingClosed(t *testing.T) {
 	e.mustErr(e.do("PUT", fmt.Sprintf("/v1/admin/ideas/%d/status", id), adminToken, map[string]string{"status": "done"}), 400, "invalid_input")
 }
 
+// Scores on shipped/declined ideas are frozen: removing a vote is refused
+// exactly like casting one.
+func TestVotingClosedFreezesRemove(t *testing.T) {
+	e := newEnv(t)
+	id := e.approvedIdea("alice", "idea")
+	e.must(e.vote(id, "bob", 1), 200)
+	e.must(e.vote(id, "carol", -1), 200)
+	del := func(sub string) resp {
+		return e.do("DELETE", fmt.Sprintf("/v1/ideas/%d/vote", id), e.token(sub, true), nil)
+	}
+	for _, st := range []string{"shipped", "declined"} {
+		e.must(e.do("PUT", fmt.Sprintf("/v1/admin/ideas/%d/status", id), adminToken, map[string]string{"status": st}), 200)
+		e.mustErr(del("bob"), 409, "voting_closed")
+		e.mustErr(del("dave"), 409, "voting_closed") // no vote to remove: still closed
+		e.wantCounts(id, 1, 1, 0)
+	}
+	e.must(e.do("PUT", fmt.Sprintf("/v1/admin/ideas/%d/status", id), adminToken, map[string]string{"status": "in_progress"}), 200)
+	e.must(del("bob"), 200)
+	e.wantCounts(id, 0, 1, -1)
+}
+
 func TestMergeRecount(t *testing.T) {
 	e := newEnv(t)
 	target := e.approvedIdea("D", "target idea")
