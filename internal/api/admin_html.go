@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -118,8 +117,10 @@ func (s *Server) session(r *http.Request) string {
 func (s *Server) csrfToken(session string) string { return s.mac("csrf:" + session) }
 
 // adminAction requires a valid session and CSRF token, parses the form and
-// redirects back to /admin (PRG) with the flash message the action returns.
-func (s *Server) adminAction(next func(w http.ResponseWriter, r *http.Request) (string, error)) http.HandlerFunc {
+// redirects back to /admin (PRG) with the flash the action returns, encoded
+// as a fixed code plus typed parameters (see admin_flash.go). An action that
+// returns the zero flash has written its own response.
+func (s *Server) adminAction(next func(w http.ResponseWriter, r *http.Request) flash) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := s.session(r)
 		if sess == "" {
@@ -139,35 +140,31 @@ func (s *Server) adminAction(next func(w http.ResponseWriter, r *http.Request) (
 			http.Error(w, "invalid CSRF token", http.StatusForbidden)
 			return
 		}
-		msg, err := next(w, r)
-		if err != nil {
-			var ce *store.ConflictError
-			switch {
-			case errors.Is(err, store.ErrNotFound):
-				msg = "Error: idea not found."
-			case errors.As(err, &ce):
-				msg = "Error: " + ce.Msg + "."
-			case errors.Is(err, errFormInput):
-				msg = "Error: " + err.Error()
-			default:
-				s.log.Error("admin action failed", "path", r.URL.Path, "err", err)
-				msg = "Error: internal error."
-			}
+		f := next(w, r)
+		if f.code == "" {
+			return
 		}
-		if msg == "" {
-			return // the action wrote its own response
-		}
-		http.Redirect(w, r, "/admin?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+		http.Redirect(w, r, "/admin?"+f.query(), http.StatusSeeOther)
 	}
 }
 
-var errFormInput = errors.New("")
-
-type formError string
-
-func (e formError) Error() string { return string(e) }
-func (e formError) Is(target error) bool {
-	return target == errFormInput
+// result returns ok when err is nil, otherwise the fixed error flash for err.
+func (s *Server) result(r *http.Request, err error, ok flash) flash {
+	var ce *store.ConflictError
+	var hm *store.HasMergedError
+	switch {
+	case err == nil:
+		return ok
+	case errors.Is(err, store.ErrNotFound):
+		return flash{code: flErrNotFound}
+	case errors.As(err, &hm):
+		return flash{code: flErrHasMerged, id: hm.ID, n: int64(hm.Merged)}
+	case errors.As(err, &ce):
+		return conflictFlash(ce, ok.id, ok.into)
+	default:
+		s.log.Error("admin action failed", "path", r.URL.Path, "err", err)
+		return flash{code: flErrInternal}
+	}
 }
 
 type adminView struct {
@@ -211,8 +208,10 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	flash := r.URL.Query().Get("msg")
-	v := adminView{LoggedIn: true, CSRF: s.csrfToken(sess), Flash: flash, FlashError: strings.HasPrefix(flash, "Error"), MergedInto: counts}
+	v := adminView{LoggedIn: true, CSRF: s.csrfToken(sess), MergedInto: counts}
+	if f, ok := parseFlash(r.URL.Query()); ok {
+		v.Flash, v.FlashError = f.text()
+	}
 	for _, i := range all {
 		switch i.ModerationState {
 		case store.ModPending:
@@ -255,104 +254,97 @@ func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
-func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) (string, error) {
+func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) flash {
 	http.SetCookie(w, &http.Cookie{
 		Name: adminCookie, Value: "", Path: "/admin", MaxAge: -1,
 		HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteStrictMode,
 	})
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
-	return "", nil
+	return flash{}
 }
 
-func formID(v string) (int64, error) {
+func formID(v string) (int64, bool) {
 	id, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-	if err != nil || id <= 0 {
-		return 0, formError("invalid idea id.")
-	}
-	return id, nil
+	return id, err == nil && id > 0
 }
 
-func (s *Server) adminFormCreate(w http.ResponseWriter, r *http.Request) (string, error) {
+// formTitleBody validates the title and body form fields; on failure it
+// returns the error flash.
+func formTitleBody(r *http.Request) (title, body string, bad flash) {
 	title, msg := cleanTitle(r.PostForm.Get("title"))
-	body := ""
-	if msg == "" {
-		body, msg = cleanBody(r.PostForm.Get("body"))
+	if msg != "" {
+		return "", "", flash{code: flErrTitle}
+	}
+	body, msg = cleanBody(r.PostForm.Get("body"))
+	if msg != "" {
+		return "", "", flash{code: flErrBody}
+	}
+	return title, body, flash{}
+}
+
+func (s *Server) adminFormCreate(w http.ResponseWriter, r *http.Request) flash {
+	title, body, bad := formTitleBody(r)
+	if bad.code != "" {
+		return bad
 	}
 	status := r.PostForm.Get("status")
 	if status == "" {
 		status = store.StatusUnderReview
 	}
-	if msg == "" && !store.ValidStatus(status) {
-		msg = "unknown status"
-	}
-	if msg != "" {
-		return "", formError(msg + ".")
+	if !store.ValidStatus(status) {
+		return flash{code: flErrBadStatus}
 	}
 	idea, err := s.store.CreateApproved(r.Context(), title, body, status)
-	if err != nil {
-		return "", err
-	}
-	return "Created idea #" + strconv.FormatInt(idea.ID, 10) + ".", nil
+	return s.result(r, err, flash{code: flCreated, id: idea.ID})
 }
 
-func (s *Server) adminFormIdeaAction(w http.ResponseWriter, r *http.Request) (string, error) {
-	id, err := formID(r.PathValue("id"))
-	if err != nil {
-		return "", err
+func (s *Server) adminFormIdeaAction(w http.ResponseWriter, r *http.Request) flash {
+	id, ok := formID(r.PathValue("id"))
+	if !ok {
+		return flash{code: flErrBadID}
 	}
 	ctx := r.Context()
-	ref := "#" + strconv.FormatInt(id, 10)
 	switch r.PathValue("action") {
 	case "approve":
-		_, err = s.store.Approve(ctx, id)
-		return "Approved " + ref + ".", err
+		_, err := s.store.Approve(ctx, id)
+		return s.result(r, err, flash{code: flApproved, id: id})
 	case "reject":
-		_, err = s.store.Reject(ctx, id)
-		return "Rejected " + ref + ".", err
+		_, err := s.store.Reject(ctx, id)
+		return s.result(r, err, flash{code: flRejected, id: id})
 	case "merge":
-		into, err := formID(r.PostForm.Get("into_id"))
-		if err != nil {
-			return "", err
+		into, ok := formID(r.PostForm.Get("into_id"))
+		if !ok {
+			return flash{code: flErrBadID}
 		}
 		res, err := s.store.Merge(ctx, id, into)
-		return "Merged " + ref + " into #" + strconv.FormatInt(into, 10) + " (" +
-			strconv.FormatInt(res.Moved, 10) + " votes moved, " + strconv.FormatInt(res.Dropped, 10) + " dropped).", err
+		return s.result(r, err, flash{code: flMerged, id: id, into: into, n: res.Moved, k: res.Dropped})
 	case "status":
 		status := r.PostForm.Get("status")
 		if !store.ValidStatus(status) {
-			return "", formError("unknown status.")
+			return flash{code: flErrBadStatus}
 		}
-		_, err = s.store.SetStatus(ctx, id, status)
-		return "Status of " + ref + " set to " + status + ".", err
+		_, err := s.store.SetStatus(ctx, id, status)
+		return s.result(r, err, flash{code: flStatus, id: id, status: status})
 	case "edit":
-		title, msg := cleanTitle(r.PostForm.Get("title"))
-		body := ""
-		if msg == "" {
-			body, msg = cleanBody(r.PostForm.Get("body"))
+		title, body, bad := formTitleBody(r)
+		if bad.code != "" {
+			return bad
 		}
-		if msg != "" {
-			return "", formError(msg + ".")
-		}
-		_, err = s.store.Edit(ctx, id, &title, &body)
-		return "Saved " + ref + ".", err
+		_, err := s.store.Edit(ctx, id, &title, &body)
+		return s.result(r, err, flash{code: flSaved, id: id})
 	case "delete":
 		err := s.store.Delete(ctx, id, r.PostForm.Get("cascade") == "1")
-		var hm *store.HasMergedError
-		if errors.As(err, &hm) {
-			return "", formError(fmt.Sprintf("%s has %d merged idea(s); tick the box to delete them too, or merge them elsewhere first.", ref, hm.Merged))
-		}
-		return "Deleted " + ref + ".", err
+		return s.result(r, err, flash{code: flDeleted, id: id})
 	}
 	http.NotFound(w, r)
-	return "", nil
+	return flash{}
 }
 
-func (s *Server) adminFormDeleteUser(w http.ResponseWriter, r *http.Request) (string, error) {
+func (s *Server) adminFormDeleteUser(w http.ResponseWriter, r *http.Request) flash {
 	sub := strings.TrimSpace(r.PostForm.Get("sub"))
 	if sub == "" {
-		return "", formError("sub is required.")
+		return flash{code: flErrSubMissing}
 	}
 	votes, ideas, err := s.store.DeleteUserData(r.Context(), sub)
-	return "User data deleted: " + strconv.FormatInt(votes, 10) + " votes deleted, " +
-		strconv.FormatInt(ideas, 10) + " ideas anonymised.", err
+	return s.result(r, err, flash{code: flUserDeleted, n: votes, k: ideas})
 }

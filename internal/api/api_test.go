@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -1040,8 +1041,11 @@ func TestAdminHTMLLoginAndEscaping(t *testing.T) {
 		t.Fatalf("status = %v", m["status"])
 	}
 	res, _ = postForm(t, c, e.srv.URL+"/admin/users/delete", url.Values{"csrf": {csrf}, "sub": {"alice"}})
-	if res.StatusCode != http.StatusSeeOther || !strings.Contains(res.Header.Get("Location"), "anonymised") {
+	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != "/admin?k=1&m=user_deleted&n=0" {
 		t.Fatalf("gdpr form = %d %s", res.StatusCode, res.Header.Get("Location"))
+	}
+	if _, body = getPage(t, c, e.srv.URL+res.Header.Get("Location")); !strings.Contains(body, "User data deleted: 0 votes deleted, 1 idea anonymised.") {
+		t.Fatal("gdpr flash not rendered")
 	}
 
 	// Logout clears the session.
@@ -1135,6 +1139,72 @@ func TestAdminLoginThrottle(t *testing.T) {
 			t.Fatalf("other client = %d, want 303", res.StatusCode)
 		}
 	})
+}
+
+// The /admin flash used to echo free text from ?msg=, so a crafted link
+// could show an admin any message (e.g. "Error: session compromised, paste
+// your token at evil.example"). Only fixed codes with typed parameters render.
+func TestAdminFlashCodesOnly(t *testing.T) {
+	e := newEnv(t)
+	c, csrf := adminLogin(t, e)
+	flashOf := func(query string) string {
+		t.Helper()
+		_, body := getPage(t, c, e.srv.URL+"/admin"+query)
+		m := regexp.MustCompile(`<p class="(?:flash|error)">([^<]*)</p>`).FindStringSubmatch(body)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	for _, q := range []string{
+		"?msg=" + url.QueryEscape("Error: session compromised, visit https://evil.example"),
+		"?m=" + url.QueryEscape("visit evil.example"),
+		"?m=status&id=1&status=" + url.QueryEscape("pwned, visit evil.example"),
+		"?m=approved&id=evil",
+		"?m=approved&id=0",
+		"?m=approved",
+		"?m=merged&id=1&into=2&n=-1&k=0",
+	} {
+		if f := flashOf(q); f != "" {
+			t.Errorf("%s rendered flash %q, want none", q, f)
+		}
+	}
+	if f := flashOf("?m=approved&id=7"); f != "Approved #7." {
+		t.Fatalf("approved flash = %q", f)
+	}
+	if f := flashOf("?m=status&id=7&status=planned"); f != "Status of #7 set to planned." {
+		t.Fatalf("status flash = %q", f)
+	}
+
+	// Every action redirects with a code, never free text; error codes render as errors.
+	id := e.submit("alice", "idea")
+	for _, tc := range []struct {
+		path string
+		form url.Values
+		want string
+	}{
+		{fmt.Sprintf("/admin/ideas/%d/approve", id), url.Values{}, "Approved #" + strconv.FormatInt(id, 10) + "."},
+		{fmt.Sprintf("/admin/ideas/%d/merge", id), url.Values{"into_id": {strconv.FormatInt(id, 10)}}, "Error: an idea cannot be merged into itself."},
+		{"/admin/ideas/999999/approve", url.Values{}, "Error: idea not found."},
+		{"/admin/ideas/abc/approve", url.Values{}, "Error: invalid idea id."},
+		{fmt.Sprintf("/admin/ideas/%d/status", id), url.Values{"status": {"nope"}}, "Error: unknown status."},
+		{"/admin/ideas", url.Values{"title": {""}}, "Error: the title must be 1 to 120 characters, without control characters."},
+	} {
+		tc.form.Set("csrf", csrf)
+		res, _ := postForm(t, c, e.srv.URL+tc.path, tc.form)
+		loc := res.Header.Get("Location")
+		if res.StatusCode != http.StatusSeeOther || strings.Contains(loc, "msg=") || !strings.Contains(loc, "m=") {
+			t.Fatalf("%s => %d %s", tc.path, res.StatusCode, loc)
+		}
+		_, body := getPage(t, c, e.srv.URL+loc)
+		cls := "flash"
+		if strings.HasPrefix(tc.want, "Error") {
+			cls = "error"
+		}
+		if !strings.Contains(body, `<p class="`+cls+`">`+template.HTMLEscapeString(tc.want)+`</p>`) {
+			t.Fatalf("%s: flash %q (class %s) missing; got %q", tc.path, tc.want, cls, flashOf(strings.TrimPrefix(loc, "/admin")))
+		}
+	}
 }
 
 func TestAdminSessionExpires(t *testing.T) {

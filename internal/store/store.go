@@ -60,14 +60,23 @@ var (
 	ErrConflict = errors.New("invalid state")
 )
 
-// ConflictError wraps ErrConflict with a developer message.
-type ConflictError struct{ Msg string }
+// ConflictError wraps ErrConflict with a stable code (for callers that map
+// it to fixed messages) and a developer message.
+type ConflictError struct{ Code, Msg string }
+
+// Conflict codes.
+const (
+	ConflictTransition    = "transition"
+	ConflictSelfMerge     = "self_merge"
+	ConflictAlreadyMerged = "already_merged"
+	ConflictBadTarget     = "bad_target"
+)
 
 func (e *ConflictError) Error() string { return e.Msg }
 func (e *ConflictError) Unwrap() error { return ErrConflict }
 
-func conflict(format string, args ...any) error {
-	return &ConflictError{Msg: fmt.Sprintf(format, args...)}
+func conflict(code, format string, args ...any) error {
+	return &ConflictError{Code: code, Msg: fmt.Sprintf(format, args...)}
 }
 
 // RateLimitedError is returned when a submission limit is hit.
@@ -349,7 +358,7 @@ func (s *Store) transition(ctx context.Context, id int64, to string, from ...str
 				ok = ok || cur == f
 			}
 			if !ok {
-				return conflict("cannot move idea %d from %s to %s", id, cur, to)
+				return conflict(ConflictTransition, "cannot move idea %d from %s to %s", id, cur, to)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE ideas SET moderation_state = $2, updated_at = now() WHERE id = $1`, id, to); err != nil {
 				return err
@@ -376,7 +385,7 @@ type MergeResult struct {
 //   - source becomes moderation_state=merged, merged_into_id=target.
 func (s *Store) Merge(ctx context.Context, sourceID, targetID int64) (MergeResult, error) {
 	if sourceID == targetID {
-		return MergeResult{}, conflict("cannot merge an idea into itself")
+		return MergeResult{}, conflict(ConflictSelfMerge, "cannot merge an idea into itself")
 	}
 	var res MergeResult
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -408,10 +417,10 @@ func (s *Store) Merge(ctx context.Context, sourceID, targetID int64) (MergeResul
 			return ErrNotFound
 		}
 		if src.mod == ModMerged {
-			return conflict("idea %d is already merged", sourceID)
+			return conflict(ConflictAlreadyMerged, "idea %d is already merged", sourceID)
 		}
 		if tgt.mod != ModApproved && tgt.mod != ModPending {
-			return conflict("merge target %d is %s; it must be approved or pending", targetID, tgt.mod)
+			return conflict(ConflictBadTarget, "merge target %d is %s; it must be approved or pending", targetID, tgt.mod)
 		}
 
 		tag, err := tx.Exec(ctx, `INSERT INTO votes (idea_id, voter_sub, value, created_at, updated_at)
