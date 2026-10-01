@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -23,6 +24,9 @@ type Config struct {
 	VoteLimitPerMinute int
 	ClockSkew          time.Duration
 	CookieSecure       bool
+	// TrustedProxies are the peers whose X-Forwarded-For is believed when
+	// deriving the client IP (admin login throttle). Default: loopback.
+	TrustedProxies []netip.Prefix
 }
 
 const (
@@ -116,6 +120,27 @@ func Load(getenv func(string) string) (Config, error) {
 			add("FV_COOKIE_SECURE must be true or false (got %q)", v)
 		} else {
 			c.CookieSecure = b
+		}
+	}
+	c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+	if v := strings.TrimSpace(getenv("FV_TRUSTED_PROXIES")); v != "" {
+		c.TrustedProxies = nil
+		for _, p := range strings.Split(v, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" || (p == "none" && v == "none") {
+				continue
+			}
+			pfx, err := netip.ParsePrefix(p)
+			if err != nil {
+				if a, aerr := netip.ParseAddr(p); aerr == nil {
+					pfx, err = a.Prefix(a.BitLen())
+				}
+			}
+			if err != nil {
+				add("FV_TRUSTED_PROXIES: %q is not an IP or CIDR", p)
+				continue
+			}
+			c.TrustedProxies = append(c.TrustedProxies, pfx.Masked())
 		}
 	}
 

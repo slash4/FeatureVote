@@ -1,9 +1,54 @@
 package api
 
 import (
+	"net"
+	"net/http"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
+
+// clientIP returns the request's client address. X-Forwarded-For is only
+// believed when the direct peer is a trusted proxy; then the rightmost hop
+// that is not itself a trusted proxy is the client (entries to its left are
+// client-controlled and ignored).
+func (s *Server) clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	peer = peer.Unmap()
+	if !s.trustedProxy(peer) {
+		return peer.String()
+	}
+	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+	for i := len(hops) - 1; i >= 0; i-- {
+		a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+		if err != nil {
+			break // malformed hop: stop trusting the chain here
+		}
+		a = a.Unmap()
+		if !s.trustedProxy(a) {
+			return a.String()
+		}
+		peer = a
+	}
+	return peer.String()
+}
+
+func (s *Server) trustedProxy(a netip.Addr) bool {
+	for _, p := range s.cfg.TrustedProxies {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
 
 // slidingWindow is an in-memory per-key sliding-window rate limiter. It is
 // per-process, which is fine because FeatureVote runs one instance per product.

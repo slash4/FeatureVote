@@ -20,6 +20,8 @@ import (
 const (
 	adminCookie     = "fv_admin"
 	adminSessionTTL = 12 * time.Hour
+	// adminLoginPerMinute caps /admin/login attempts per client IP.
+	adminLoginPerMinute = 5
 )
 
 //go:embed admin.html.tmpl
@@ -227,12 +229,21 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
+	// Throttle before looking at the token: every attempt counts, so a
+	// guesser gets 5 tries per minute per IP whatever the outcome.
+	ip := s.clientIP(r)
+	if ok, retry := s.loginLimit.allow(ip, s.now()); !ok {
+		s.log.Warn("admin login throttled", "ip", ip)
+		w.Header().Set("Retry-After", retryAfterSeconds(retry))
+		s.renderAdmin(w, http.StatusTooManyRequests, adminView{Error: "Too many login attempts. Wait a minute and try again."})
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
 	if !s.adminTokenOK(r.PostForm.Get("token")) {
-		s.log.Warn("admin login failed")
+		s.log.Warn("admin login failed", "ip", ip)
 		s.renderAdmin(w, http.StatusUnauthorized, adminView{Error: "Wrong admin token."})
 		return
 	}

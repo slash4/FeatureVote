@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +83,32 @@ func TestLoadErrors(t *testing.T) {
 				t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestTrustedProxies(t *testing.T) {
+	c, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(c.TrustedProxies) != "[127.0.0.0/8 ::1/128]" {
+		t.Fatalf("default trusted proxies = %v", c.TrustedProxies)
+	}
+	m := validEnv()
+	m["FV_TRUSTED_PROXIES"] = " 10.0.0.0/8, 192.168.1.5 ,fd00::/8"
+	if c, err = Load(env(m)); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(c.TrustedProxies) != "[10.0.0.0/8 192.168.1.5/32 fd00::/8]" {
+		t.Fatalf("trusted proxies = %v", c.TrustedProxies)
+	}
+	m["FV_TRUSTED_PROXIES"] = "none"
+	if c, err = Load(env(m)); err != nil || len(c.TrustedProxies) != 0 {
+		t.Fatalf("none => %v, %v", c.TrustedProxies, err)
+	}
+	m["FV_TRUSTED_PROXIES"] = "10.0.0.0/8,proxy.local"
+	if _, err = Load(env(m)); err == nil || !strings.Contains(err.Error(), "FV_TRUSTED_PROXIES") {
+		t.Fatalf("bad proxy err = %v", err)
 	}
 }
 

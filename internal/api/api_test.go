@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -1081,6 +1082,59 @@ func TestAdminHTMLCSRF(t *testing.T) {
 	if res.StatusCode != http.StatusSeeOther {
 		t.Fatalf("valid status = %d", res.StatusCode)
 	}
+}
+
+// /admin/login allows 5 attempts per client IP per minute (successful or
+// not); the 6th gets 429 + Retry-After without the token being checked.
+// X-Forwarded-For is honoured only when the direct peer is a trusted proxy.
+func TestAdminLoginThrottle(t *testing.T) {
+	login := func(e *env, tok string, headers ...string) *http.Response {
+		res, _ := postForm(t, adminClient(t), e.srv.URL+"/admin/login", url.Values{"token": {tok}}, headers...)
+		return res
+	}
+
+	t.Run("direct clients", func(t *testing.T) {
+		e := newEnv(t)
+		for i := 0; i < 5; i++ {
+			if res := login(e, "wrong"); res.StatusCode != 401 {
+				t.Fatalf("attempt %d = %d, want 401", i+1, res.StatusCode)
+			}
+		}
+		res := login(e, adminToken) // even the right token is throttled now
+		if res.StatusCode != 429 {
+			t.Fatalf("6th attempt = %d, want 429", res.StatusCode)
+		}
+		if ra, _ := strconv.Atoi(res.Header.Get("Retry-After")); ra < 1 || ra > 60 {
+			t.Fatalf("Retry-After = %q", res.Header.Get("Retry-After"))
+		}
+		// Untrusted peer: a spoofed X-Forwarded-For does not get a fresh bucket.
+		if res := login(e, adminToken, "X-Forwarded-For", "203.0.113.9"); res.StatusCode != 429 {
+			t.Fatalf("spoofed XFF = %d, want 429", res.StatusCode)
+		}
+		e.clock.Advance(61 * time.Second)
+		if res := login(e, adminToken); res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("after window = %d, want 303", res.StatusCode)
+		}
+	})
+
+	t.Run("behind a trusted proxy", func(t *testing.T) {
+		e := newEnv(t, func(c *config.Config) { c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")} })
+		for i := 0; i < 5; i++ {
+			login(e, "wrong", "X-Forwarded-For", "198.51.100.7")
+		}
+		if res := login(e, adminToken, "X-Forwarded-For", "198.51.100.7"); res.StatusCode != 429 {
+			t.Fatalf("attacker 6th = %d, want 429", res.StatusCode)
+		}
+		// The rightmost untrusted hop is the client: a forged leftmost entry
+		// does not escape the attacker's bucket...
+		if res := login(e, adminToken, "X-Forwarded-For", "192.0.2.1, 198.51.100.7"); res.StatusCode != 429 {
+			t.Fatalf("forged XFF prefix = %d, want 429", res.StatusCode)
+		}
+		// ...and a different client is not locked out by the attacker.
+		if res := login(e, adminToken, "X-Forwarded-For", "198.51.100.8"); res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("other client = %d, want 303", res.StatusCode)
+		}
+	})
 }
 
 func TestAdminSessionExpires(t *testing.T) {
