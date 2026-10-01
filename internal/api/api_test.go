@@ -763,6 +763,40 @@ func TestSizeLimits(t *testing.T) {
 	e.must(e.do("POST", "/v1/ideas", tok, `{"title":"fine","extra":true}`), 201)
 }
 
+// NUL and other C0 control characters used to reach Postgres (NUL => 500).
+// They are now a 400 everywhere a title or body is accepted; LF and TAB are
+// allowed and CR/CRLF is normalised to \n (HTML textareas submit CRLF).
+func TestControlCharacters(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.SubmitLimitPerDay = 100 })
+	tok := e.token("alice", true)
+	for _, bad := range []string{"\u0000", "\u0001", "\u0007", "\u0008", "\u000b", "\u001b", "\u001f"} {
+		jq, _ := json.Marshal(bad) // JSON escape, e.g. "\u0000"
+		esc := string(jq[1 : len(jq)-1])
+		e.mustErr(e.do("POST", "/v1/ideas", tok, `{"title":"a`+esc+`b"}`), 400, "invalid_input")
+		e.mustErr(e.do("POST", "/v1/ideas", tok, `{"title":"ok","body":"x`+esc+`y"}`), 400, "invalid_input")
+		e.mustErr(e.do("POST", "/v1/admin/ideas", adminToken, `{"title":"a`+esc+`b"}`), 400, "invalid_input")
+	}
+	const tab = "\x09"
+	r := e.must(e.do("POST", "/v1/ideas", tok, map[string]string{"title": "tab" + tab + "here", "body": "line1\r\nline2\rline3\n" + tab + "indented"}), 201).json(t)
+	if r["title"] != "tab"+tab+"here" || r["body"] != "line1\nline2\nline3\n"+tab+"indented" {
+		t.Fatalf("allowed whitespace mangled: %q / %q", r["title"], r["body"])
+	}
+	id := int64(r["id"].(float64))
+	e.mustErr(e.do("PATCH", fmt.Sprintf("/v1/admin/ideas/%d", id), adminToken, `{"body":"x\u0000"}`), 400, "invalid_input")
+
+	// Admin HTML form: rejected with an error flash, nothing stored.
+	c, csrf := adminLogin(t, e)
+	res, _ := postForm(t, c, e.srv.URL+"/admin/ideas", url.Values{"csrf": {csrf}, "title": {"nul\x00title"}})
+	if res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("admin form status = %d", res.StatusCode)
+	}
+	var n int
+	e.pool.QueryRow(context.Background(), `SELECT count(*) FROM ideas WHERE title LIKE 'nul%'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("control-char title stored")
+	}
+}
+
 func TestPublicJSONNeverLeaksAuthor(t *testing.T) {
 	e := newEnv(t)
 	id := e.approvedIdea("alice-secret-sub", "idea")
