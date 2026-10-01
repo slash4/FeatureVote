@@ -468,16 +468,68 @@ func (s *Store) Edit(ctx context.Context, id int64, title, body *string) (Idea, 
 	return s.GetIdea(ctx, id)
 }
 
-// Delete removes an idea; its votes and ideas merged into it cascade.
-func (s *Store) Delete(ctx context.Context, id int64) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM ideas WHERE id = $1`, id)
-	if err != nil {
+// HasMergedError is returned by Delete when other ideas are merged into the
+// idea and the caller did not ask for them to be deleted too.
+type HasMergedError struct {
+	ID     int64
+	Merged int
+}
+
+func (e *HasMergedError) Error() string {
+	return fmt.Sprintf("idea %d has %d merged idea(s)", e.ID, e.Merged)
+}
+
+// Delete removes an idea and its votes. If other ideas are merged into it,
+// Delete refuses with *HasMergedError unless withMerged is true, in which case
+// the merged ideas (and their votes) are deleted in the same transaction.
+// The schema backs this up: merged_into_id has no ON DELETE CASCADE (0002).
+func (s *Store) Delete(ctx context.Context, id int64, withMerged bool) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Locking the target blocks a concurrent Merge into it (Merge locks
+		// both rows FOR UPDATE), so the count below cannot go stale.
+		var one int
+		err := tx.QueryRow(ctx, `SELECT 1 FROM ideas WHERE id = $1 FOR UPDATE`, id).Scan(&one)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM ideas WHERE merged_into_id = $1`, id).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			if !withMerged {
+				return &HasMergedError{ID: id, Merged: n}
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM ideas WHERE merged_into_id = $1`, id); err != nil {
+				return err
+			}
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM ideas WHERE id = $1`, id)
 		return err
+	})
+}
+
+// MergedCounts returns, per merge target, how many ideas are merged into it.
+func (s *Store) MergedCounts(ctx context.Context) (map[int64]int, error) {
+	rows, err := s.pool.Query(ctx, `SELECT merged_into_id, count(*) FROM ideas
+		WHERE merged_into_id IS NOT NULL GROUP BY merged_into_id`)
+	if err != nil {
+		return nil, err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var id int64
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
 	}
-	return nil
+	return out, rows.Err()
 }
 
 // DeleteUserData implements GDPR erasure for sub: all their votes are deleted

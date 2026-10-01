@@ -58,7 +58,7 @@
         <form class="inline" method="post" action="/admin/ideas/{{.ID}}/approve"><input type="hidden" name="csrf" value="{{$csrf}}"><button type="submit">Approve</button></form>
         <form class="inline" method="post" action="/admin/ideas/{{.ID}}/reject"><input type="hidden" name="csrf" value="{{$csrf}}"><button type="submit">Reject</button></form>
         <form class="inline" method="post" action="/admin/ideas/{{.ID}}/merge"><input type="hidden" name="csrf" value="{{$csrf}}"><input class="id" type="number" name="into_id" min="1" placeholder="into #" required><button type="submit">Merge</button></form>
-        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="danger" type="submit">Delete</button></form>
+        {{template "delete" del .ID $csrf (index $.MergedInto .ID)}}
       </td>
     </tr>
     {{end}}
@@ -95,7 +95,7 @@
       <td>
         <form class="inline" method="post" action="/admin/ideas/{{.ID}}/reject"><input type="hidden" name="csrf" value="{{$csrf}}"><button type="submit">Unpublish</button></form>
         <form class="inline" method="post" action="/admin/ideas/{{.ID}}/merge"><input type="hidden" name="csrf" value="{{$csrf}}"><input class="id" type="number" name="into_id" min="1" placeholder="into #" required><button type="submit">Merge</button></form>
-        <form class="inline" method="post" action="/admin/ideas/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="danger" type="submit">Delete</button></form>
+        {{template "delete" del .ID $csrf (index $.MergedInto .ID)}}
       </td>
     </tr>
     {{end}}
@@ -111,7 +111,7 @@
         <td><div class="title">{{.Title}}</div><div class="body">{{.Body}}</div></td>
         <td>
           <form class="inline" method="post" action="/admin/ideas/{{.ID}}/approve"><input type="hidden" name="csrf" value="{{$csrf}}"><button type="submit">Approve</button></form>
-          <form class="inline" method="post" action="/admin/ideas/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="danger" type="submit">Delete</button></form>
+          {{template "delete" del .ID $csrf (index $.MergedInto .ID)}}
         </td>
       </tr>
       {{end}}
@@ -126,7 +126,7 @@
         <td>{{.ID}}</td>
         <td><div class="title">{{.Title}}</div></td>
         <td class="muted">merged into #{{with .MergedIntoID}}{{.}}{{end}}</td>
-        <td><form class="inline" method="post" action="/admin/ideas/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="danger" type="submit">Delete</button></form></td>
+        <td>{{template "delete" del .ID $csrf (index $.MergedInto .ID)}}</td>
       </tr>
       {{end}}
     </table>
@@ -150,3 +150,4 @@
 {{end}}
 </body>
 </html>
+{{define "delete"}}<form class="inline" method="post" action="/admin/ideas/{{.ID}}/delete"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if .Merged}}<label class="muted"><input type="checkbox" name="cascade" value="1" required> also delete {{.Merged}} merged idea{{if gt .Merged 1}}s{{end}}</label> {{end}}<button class="danger" type="submit">Delete</button></form>{{end}}

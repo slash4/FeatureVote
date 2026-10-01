@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -35,7 +36,17 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
 		return *p
 	},
 	"date": func(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") },
+	// del bundles what the shared delete form needs.
+	"del": func(id int64, csrf string, merged int) deleteForm {
+		return deleteForm{ID: id, CSRF: csrf, Merged: merged}
+	},
 }).Parse(adminTemplateSrc))
+
+type deleteForm struct {
+	ID     int64
+	CSRF   string
+	Merged int
+}
 
 func (s *Server) registerAdminPages(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin", s.adminPage)
@@ -168,6 +179,9 @@ type adminView struct {
 	Approved   []store.Idea
 	Rejected   []store.Idea
 	Merged     []store.Idea
+	// MergedInto counts, per merge target, the ideas merged into it (the
+	// delete form warns and asks for confirmation when it is non-zero).
+	MergedInto map[int64]int
 }
 
 func (s *Server) renderAdmin(w http.ResponseWriter, status int, v adminView) {
@@ -186,13 +200,17 @@ func (s *Server) adminPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	all, err := s.store.ListByModeration(r.Context(), "all")
+	var counts map[int64]int
+	if err == nil {
+		counts, err = s.store.MergedCounts(r.Context())
+	}
 	if err != nil {
 		s.log.Error("admin page", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	flash := r.URL.Query().Get("msg")
-	v := adminView{LoggedIn: true, CSRF: s.csrfToken(sess), Flash: flash, FlashError: strings.HasPrefix(flash, "Error")}
+	v := adminView{LoggedIn: true, CSRF: s.csrfToken(sess), Flash: flash, FlashError: strings.HasPrefix(flash, "Error"), MergedInto: counts}
 	for _, i := range all {
 		switch i.ModerationState {
 		case store.ModPending:
@@ -307,7 +325,12 @@ func (s *Server) adminFormIdeaAction(w http.ResponseWriter, r *http.Request) (st
 		_, err = s.store.Edit(ctx, id, &title, &body)
 		return "Saved " + ref + ".", err
 	case "delete":
-		return "Deleted " + ref + ".", s.store.Delete(ctx, id)
+		err := s.store.Delete(ctx, id, r.PostForm.Get("cascade") == "1")
+		var hm *store.HasMergedError
+		if errors.As(err, &hm) {
+			return "", formError(fmt.Sprintf("%s has %d merged idea(s); tick the box to delete them too, or merge them elsewhere first.", ref, hm.Merged))
+		}
+		return "Deleted " + ref + ".", err
 	}
 	http.NotFound(w, r)
 	return "", nil

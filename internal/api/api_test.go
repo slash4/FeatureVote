@@ -603,12 +603,71 @@ func TestChainedMergeRepoints(t *testing.T) {
 	if into != c {
 		t.Fatalf("a.merged_into_id = %d, want %d", into, c)
 	}
-	// Deleting c cascades to the ideas merged into it.
-	e.must(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d", c), adminToken, nil), 204)
-	var n int
-	e.pool.QueryRow(context.Background(), `SELECT count(*) FROM ideas`).Scan(&n)
-	if n != 0 {
-		t.Fatalf("ideas left = %d, want 0", n)
+}
+
+// Deleting a merge target must not silently cascade-delete the ideas merged
+// into it: the API refuses with 409 unless ?cascade=true, the database
+// refuses too (ON DELETE RESTRICT, migration 0002), and /admin requires an
+// explicit confirmation checkbox.
+func TestDeleteMergeTarget(t *testing.T) {
+	e := newEnv(t)
+	a := e.approvedIdea("u1", "a")
+	b := e.approvedIdea("u2", "b")
+	c := e.approvedIdea("u3", "c")
+	e.must(e.do("POST", fmt.Sprintf("/v1/admin/ideas/%d/merge", a), adminToken, map[string]int64{"into_id": c}), 200)
+	e.must(e.do("POST", fmt.Sprintf("/v1/admin/ideas/%d/merge", b), adminToken, map[string]int64{"into_id": c}), 200)
+	count := func() int {
+		var n int
+		e.pool.QueryRow(context.Background(), `SELECT count(*) FROM ideas`).Scan(&n)
+		return n
+	}
+
+	r := e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d", c), adminToken, nil)
+	e.mustErr(r, 409, "has_merged_ideas")
+	if !strings.Contains(string(r.body), "2 merged") {
+		t.Fatalf("409 body should carry the count: %s", r.body)
+	}
+	e.mustErr(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d?cascade=false", c), adminToken, nil), 409, "has_merged_ideas")
+	if n := count(); n != 3 {
+		t.Fatalf("ideas after refused delete = %d, want 3", n)
+	}
+
+	// The schema itself refuses the cascade.
+	if _, err := e.pool.Exec(context.Background(), `DELETE FROM ideas WHERE id = $1`, c); err == nil {
+		t.Fatal("raw DELETE of a merge target succeeded; FK should be ON DELETE RESTRICT")
+	}
+
+	// A merged idea itself (no children) deletes normally.
+	e.must(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d", a), adminToken, nil), 204)
+	e.mustErr(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d?cascade=maybe", c), adminToken, nil), 400, "invalid_input")
+
+	// Explicit cascade deletes the target and the remaining merged idea.
+	e.must(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d?cascade=true", c), adminToken, nil), 204)
+	if n := count(); n != 0 {
+		t.Fatalf("ideas after cascade = %d, want 0", n)
+	}
+
+	// Admin HTML: the delete form warns with the count and needs confirmation.
+	x := e.approvedIdea("u4", "x")
+	y := e.approvedIdea("u5", "y")
+	e.must(e.do("POST", fmt.Sprintf("/v1/admin/ideas/%d/merge", y), adminToken, map[string]int64{"into_id": x}), 200)
+	hc, csrf := adminLogin(t, e)
+	_, page := getPage(t, hc, e.srv.URL+"/admin")
+	if !strings.Contains(page, `name="cascade"`) || !strings.Contains(page, "also delete 1 merged idea") {
+		t.Fatalf("admin page lacks the merged-ideas delete warning")
+	}
+	u := fmt.Sprintf("%s/admin/ideas/%d/delete", e.srv.URL, x)
+	res, _ := postForm(t, hc, u, url.Values{"csrf": {csrf}})
+	if res.StatusCode != http.StatusSeeOther || count() != 2 {
+		t.Fatalf("unconfirmed form delete: status %d, ideas %d", res.StatusCode, count())
+	}
+	_, page = getPage(t, hc, e.srv.URL+res.Header.Get("Location"))
+	if !strings.Contains(page, `class="error"`) {
+		t.Fatalf("unconfirmed delete shows no error flash")
+	}
+	res, _ = postForm(t, hc, u, url.Values{"csrf": {csrf}, "cascade": {"1"}})
+	if res.StatusCode != http.StatusSeeOther || count() != 0 {
+		t.Fatalf("confirmed form delete: status %d, ideas %d", res.StatusCode, count())
 	}
 }
 

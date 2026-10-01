@@ -424,8 +424,11 @@ curl -s -X PATCH -H "$AUTH" -H 'Content-Type: application/json' -d '{"title":"Da
 curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' \
      -d '{"title":"Public roadmap","body":"","status":"planned"}' "$FV/v1/admin/ideas"
 
-# Delete an idea (its votes and ideas merged into it are deleted too) -> 204
+# Delete an idea and its votes -> 204. If other ideas are merged into it the call is
+# refused with 409 has_merged_ideas (the message carries the count); merge those
+# elsewhere first, or add ?cascade=true to delete them as well.
 curl -s -X DELETE -H "$AUTH" "$FV/v1/admin/ideas/42"
+curl -s -X DELETE -H "$AUTH" "$FV/v1/admin/ideas/42?cascade=true"
 
 # GDPR: erase a user -> {"votes_deleted":n,"ideas_anonymised":m}
 curl -s -X DELETE -H "$AUTH" "$FV/v1/admin/users/usr_8f2c"
@@ -474,7 +477,7 @@ All JSON. `/v1/*` responses carry `Cache-Control: no-store`. Request bodies are 
 | `POST /v1/admin/ideas/{id}/merge` `{"into_id"}` | admin | `200 {"idea":AdminIdea,"moved":n,"dropped":m}` | |
 | `PUT /v1/admin/ideas/{id}/status` `{"status"}` | admin | `200 AdminIdea` | |
 | `PATCH /v1/admin/ideas/{id}` `{"title"?,"body"?}` | admin | `200 AdminIdea` | |
-| `DELETE /v1/admin/ideas/{id}` | admin | `204` | |
+| `DELETE /v1/admin/ideas/{id}[?cascade=true]` | admin | `204` | `409 has_merged_ideas` unless `cascade=true` |
 | `DELETE /v1/admin/users/{sub}` | admin | `200 {"votes_deleted":n,"ideas_anonymised":m}` | |
 
 Check order for writes: token (`401`) → `voter` (`403 not_eligible`) → rate limit (`429`) → input / idea checks.
@@ -501,6 +504,7 @@ Errors: `{"error":{"code":"<code>","message":"<english developer message>"}}`. M
 | 403 | `forbidden_origin` | CORS preflight from an origin not in `FV_ALLOWED_ORIGINS` |
 | 404 | `not_found` | unknown idea, or not approved |
 | 409 | `voting_closed` | idea is `shipped` or `declined` (cast and remove) |
+| 409 | `has_merged_ideas` | admin delete of an idea other ideas are merged into, without `?cascade=true` |
 | 413 | `payload_too_large` | body > 16 KiB |
 | 429 | `rate_limited` | submit or vote limit; honour `Retry-After` (seconds) |
 | 500 | `internal` | server error |

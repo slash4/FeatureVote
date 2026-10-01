@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/slash4/featurevote/internal/store"
@@ -183,7 +185,24 @@ func (s *Server) handleAdminDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "idea not found")
 		return
 	}
-	if s.adminStoreError(w, r, s.store.Delete(r.Context(), id)) {
+	cascade := false
+	if v := r.URL.Query().Get("cascade"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, codeInvalidInput, "cascade must be true or false")
+			return
+		}
+		cascade = b
+	}
+	err := s.store.Delete(r.Context(), id, cascade)
+	var hm *store.HasMergedError
+	if errors.As(err, &hm) {
+		writeError(w, http.StatusConflict, codeHasMergedIdeas, fmt.Sprintf(
+			"idea %d has %d merged idea(s); merge them elsewhere first or retry with ?cascade=true to delete them too",
+			hm.ID, hm.Merged))
+		return
+	}
+	if s.adminStoreError(w, r, err) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -22,6 +22,7 @@ const (
 	codeOwnIdea         = "own_idea"
 	codeNotFound        = "not_found"
 	codeVotingClosed    = "voting_closed"
+	codeHasMergedIdeas  = "has_merged_ideas"
 	codeInvalidInput    = "invalid_input"
 	codePayloadTooLarge = "payload_too_large"
 	codeRateLimited     = "rate_limited"
