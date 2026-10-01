@@ -21,9 +21,11 @@ module FeatureVoteToken
   TTL = 600 # seconds; FeatureVote rejects tokens living longer than 15 minutes
 
   # sub: opaque, stable user id (never an email). voter: the host's eligibility decision.
-  def self.mint(secret:, issuer:, sub:, voter:, ttl: TTL)
+  # audience: the instance's FV_AUDIENCE (FEATURE_VOTE_AUDIENCE on the host); nil/"" omits aud.
+  def self.mint(secret:, issuer:, sub:, voter:, ttl: TTL, audience: nil)
     now = Time.now.to_i
     payload = { iss: issuer, sub: sub.to_s, voter: voter == true, iat: now, exp: now + ttl }
+    payload[:aud] = audience.to_s unless audience.to_s.empty?
     JWT.encode(payload, secret, "HS256")
   end
 end

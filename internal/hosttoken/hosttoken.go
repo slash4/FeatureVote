@@ -17,7 +17,8 @@ import (
 	"time"
 )
 
-// MaxLifetime is the longest token lifetime (exp - now) the service accepts.
+// MaxLifetime is the longest token lifetime the service accepts, checked
+// both as exp - iat (what the host minted) and as exp - now (plus skew).
 const MaxLifetime = 15 * time.Minute
 
 // maxSubLen bounds the opaque subject identifier.
@@ -40,15 +41,22 @@ type Claims struct {
 	Subject   string    `json:"sub"`
 	Voter     bool      `json:"voter"`
 	ExpiresAt time.Time `json:"exp"`
-	// IssuedAt is zero when the token has no iat claim.
-	IssuedAt time.Time `json:"iat,omitzero"`
+	IssuedAt  time.Time `json:"iat"`
+	// Audience is the aud value matched against Verifier.Audience (empty
+	// when no audience is configured). Encode writes it as the aud claim,
+	// omitted when empty.
+	Audience string `json:"aud,omitempty"`
 }
 
 // Verifier checks host tokens.
 type Verifier struct {
 	Secret []byte
 	Issuer string
-	Skew   time.Duration
+	// Audience, when non-empty, must appear in the token's aud claim (a
+	// string or an array of strings); tokens without aud are then rejected.
+	// When empty, aud is not checked, so hosts can start sending it first.
+	Audience string
+	Skew     time.Duration
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
 }
@@ -140,20 +148,43 @@ func (v *Verifier) Verify(token string) (Claims, error) {
 	if exp.After(now.Add(MaxLifetime + v.Skew)) {
 		return Claims{}, ErrInvalid // host minted a too long-lived token
 	}
-	if raw, present := payload["iat"]; present {
-		iat, ok := numericDate(raw)
-		if !ok || iat.After(now.Add(v.Skew)) {
-			return Claims{}, ErrInvalid
-		}
-		c.IssuedAt = iat
+	// iat is required: without it a leaked token's lifetime is bounded only
+	// by exp - now, which an attacker holding the secret could keep fresh.
+	// exp - iat is host-controlled (no clock involved), so no skew applies.
+	iat, ok := numericDate(payload["iat"])
+	if !ok || iat.After(now.Add(v.Skew)) || exp.Sub(iat) > MaxLifetime {
+		return Claims{}, ErrInvalid
 	}
+	c.IssuedAt = iat
 	if raw, present := payload["nbf"]; present {
 		nbf, ok := numericDate(raw)
 		if !ok || nbf.After(now.Add(v.Skew)) {
 			return Claims{}, ErrInvalid
 		}
 	}
+	if v.Audience != "" {
+		if !audienceContains(payload["aud"], v.Audience) {
+			return Claims{}, ErrInvalid
+		}
+		c.Audience = v.Audience
+	}
 	return c, nil
+}
+
+// audienceContains reports whether the aud claim (RFC 7519 section 4.1.3: a
+// string or an array of strings) contains want. Any other shape fails.
+func audienceContains(aud any, want string) bool {
+	switch a := aud.(type) {
+	case string:
+		return a == want
+	case []any:
+		for _, e := range a {
+			if s, ok := e.(string); ok && s == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // numericDate converts a JSON number (seconds since the epoch, possibly
@@ -178,14 +209,21 @@ func Mint(secret, issuer, sub string, voter bool, ttl time.Duration) string {
 
 // MintAt is Mint with an explicit issue time (for tests and tools).
 func MintAt(now time.Time, secret, issuer, sub string, voter bool, ttl time.Duration) string {
+	return Encode(secret, Claims{Issuer: issuer, Subject: sub, Voter: voter, IssuedAt: now, ExpiresAt: now.Add(ttl)})
+}
+
+// Encode signs c as a host token with unix-second iat/exp and, when
+// c.Audience is set, an aud claim. It performs no validation.
+func Encode(secret string, c Claims) string {
 	header := `{"alg":"HS256","typ":"JWT"}`
 	payload, _ := json.Marshal(struct {
 		Iss   string `json:"iss"`
 		Sub   string `json:"sub"`
+		Aud   string `json:"aud,omitempty"`
 		Voter bool   `json:"voter"`
 		Iat   int64  `json:"iat"`
 		Exp   int64  `json:"exp"`
-	}{issuer, sub, voter, now.Unix(), now.Add(ttl).Unix()})
+	}{c.Issuer, c.Subject, c.Audience, c.Voter, c.IssuedAt.Unix(), c.ExpiresAt.Unix()})
 	return Sign(secret, []byte(header), payload)
 }
 

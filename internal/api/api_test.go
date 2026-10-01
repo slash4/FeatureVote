@@ -452,7 +452,7 @@ func TestTokenValidation(t *testing.T) {
 	id := e.approvedIdea("alice", "idea")
 	now := e.clock.Now()
 	exp := strconv.FormatInt(now.Add(5*time.Minute).Unix(), 10)
-	good := `{"iss":"okokumo","sub":"bob","voter":true,"exp":` + exp + `}`
+	good := `{"iss":"okokumo","sub":"bob","voter":true,"iat":` + strconv.FormatInt(now.Unix(), 10) + `,"exp":` + exp + `}`
 	hs := []byte(`{"alg":"HS256","typ":"JWT"}`)
 	enc := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	path := fmt.Sprintf("/v1/ideas/%d/vote", id)
@@ -469,6 +469,8 @@ func TestTokenValidation(t *testing.T) {
 		{"alg HS512", hosttoken.Sign(hostSecret, []byte(`{"alg":"HS512","typ":"JWT"}`), []byte(good)), "invalid_token"},
 		{"lifetime > 15m", hosttoken.MintAt(now, hostSecret, hostIssuer, "bob", true, 16*time.Minute), "invalid_token"},
 		{"missing sub", hosttoken.Sign(hostSecret, hs, []byte(`{"iss":"okokumo","voter":true,"exp":`+exp+`}`)), "invalid_token"},
+		{"missing iat", hosttoken.Sign(hostSecret, hs, []byte(`{"iss":"okokumo","sub":"bob","voter":true,"exp":`+exp+`}`)), "invalid_token"},
+		{"exp - iat > 15m", hosttoken.MintAt(now.Add(-5*time.Minute), hostSecret, hostIssuer, "bob", true, 16*time.Minute), "invalid_token"},
 		{"garbage", "garbage", "invalid_token"},
 	}
 	for _, tc := range cases {
@@ -492,6 +494,27 @@ func TestTokenValidation(t *testing.T) {
 		e.must(e.do("GET", "/v1/me", tok, nil), 200)
 		e.clock.Advance(10*time.Minute + 31*time.Second)
 		e.mustErr(e.do("GET", "/v1/me", tok, nil), 401, "token_expired")
+	})
+}
+
+func TestTokenAudience(t *testing.T) {
+	const aud = "feedback.okokumo.com"
+	mint := func(e *env, a string) string {
+		now := e.clock.Now()
+		return hosttoken.Encode(hostSecret, hosttoken.Claims{Issuer: hostIssuer, Subject: "bob", Voter: true,
+			IssuedAt: now, ExpiresAt: now.Add(10 * time.Minute), Audience: a})
+	}
+	t.Run("FV_AUDIENCE set", func(t *testing.T) {
+		e := newEnv(t, func(c *config.Config) { c.Audience = aud })
+		e.must(e.do("GET", "/v1/me", mint(e, aud), nil), 200)
+		// A token for another instance sharing the secret is not replayable.
+		e.mustErr(e.do("GET", "/v1/me", mint(e, "feedback.getdoloop.com"), nil), 401, "invalid_token")
+		e.mustErr(e.do("GET", "/v1/me", mint(e, ""), nil), 401, "invalid_token")
+	})
+	t.Run("FV_AUDIENCE unset is backward compatible", func(t *testing.T) {
+		e := newEnv(t)
+		e.must(e.do("GET", "/v1/me", mint(e, ""), nil), 200)
+		e.must(e.do("GET", "/v1/me", mint(e, aud), nil), 200)
 	})
 }
 

@@ -61,10 +61,11 @@ func NewServer(opts Options) *Server {
 		s.now = time.Now
 	}
 	s.verifier = &hosttoken.Verifier{
-		Secret: []byte(s.cfg.HostSecret),
-		Issuer: s.cfg.HostIssuer,
-		Skew:   s.cfg.ClockSkew,
-		Now:    s.now,
+		Secret:   []byte(s.cfg.HostSecret),
+		Issuer:   s.cfg.HostIssuer,
+		Audience: s.cfg.Audience,
+		Skew:     s.cfg.ClockSkew,
+		Now:      s.now,
 	}
 	s.voteLimit = newSlidingWindow(s.cfg.VoteLimitPerMinute, time.Minute)
 	s.loginLimit = newSlidingWindow(adminLoginPerMinute, time.Minute)

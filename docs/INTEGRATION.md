@@ -62,7 +62,8 @@ Claims:
 | `iss`   | string        | yes      | must equal the instance's `FV_HOST_ISSUER` (e.g. `"okokumo"`, `"doloop"`) | rejects tokens from another product |
 | `sub`   | string        | yes      | non-empty, ≤ 255 bytes, **opaque stable user id** — never an email or a name | the only identity stored (`votes.voter_sub`, `ideas.author_sub`) |
 | `voter` | JSON boolean  | yes*     | the **host's eligibility decision** (e.g. paid plan) | `true`: may vote and submit. `false`/missing/non-boolean: read-only (`403 not_eligible` on writes) |
-| `iat`   | number (unix seconds) | recommended | must not be in the future (beyond skew) | sanity check only |
+| `aud`   | string or array of strings | only when `FV_AUDIENCE` is set | must contain the instance's `FV_AUDIENCE` (e.g. `"feedback.okokumo.com"`) | stops a token minted for one instance being replayed against another that shares the secret |
+| `iat`   | number (unix seconds) | **yes** | not in the future (beyond skew); `exp − iat ≤ 15 min` | bounds the minted lifetime |
 | `exp`   | number (unix seconds) | yes | `exp − now ≤ 15 min` (plus skew) | token rejected once expired |
 
 \* a missing `voter` is treated as `false`.
@@ -71,8 +72,10 @@ Validation (`FV_CLOCK_SKEW`, default 30 s):
 
 - signature: HMAC-SHA256 over `base64url(header) + "." + base64url(payload)`, constant-time compare;
 - expired if `now > exp + skew` → `401 token_expired`;
-- rejected if `exp > now + 15m + skew` (host minted a too long-lived token) → `401 invalid_token`;
-- rejected if `iat` or `nbf` is present and `> now + skew` → `401 invalid_token`;
+- rejected if `exp > now + 15m + skew` or `exp − iat > 15m` (host minted a too long-lived token) → `401 invalid_token`;
+- rejected if `iat` is missing, or `iat` or `nbf` is `> now + skew` → `401 invalid_token`;
+- when `FV_AUDIENCE` is set: rejected if `aud` is missing or does not contain it → `401 invalid_token`
+  (unset: `aud` is ignored, so hosts can start sending it before the instance enforces it);
 - anything else malformed → `401 invalid_token`. The token is never logged.
 
 **Recommended TTL: 10 minutes.** The widget refreshes the token 60 s before `exp` and, on a `401`,
@@ -119,18 +122,23 @@ import (
 
 // MintFeatureVoteToken returns a short-lived HS256 JWT identifying the
 // current user to FeatureVote. sub must be an opaque, stable user id (never an
-// email); voter is the host's eligibility decision.
-func MintFeatureVoteToken(secret, issuer, sub string, voter bool, ttl time.Duration) string {
+// email); voter is the host's eligibility decision. audience is the
+// instance's FV_AUDIENCE (FEATURE_VOTE_AUDIENCE on the host); "" omits aud.
+func MintFeatureVoteToken(secret, issuer, audience, sub string, voter bool, ttl time.Duration) string {
 	enc := base64.RawURLEncoding
 	now := time.Now()
 	header := enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	claims, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"iss":   issuer,
 		"sub":   sub,
 		"voter": voter,
 		"iat":   now.Unix(),
 		"exp":   now.Add(ttl).Unix(),
-	})
+	}
+	if audience != "" {
+		payload["aud"] = audience
+	}
+	claims, _ := json.Marshal(payload)
 	signingInput := header + "." + enc.EncodeToString(claims)
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(signingInput))
@@ -158,7 +166,8 @@ func FeatureVoteTokenHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
-	token := MintFeatureVoteToken(secret, issuer, user.ID, user.HasPaidPlan(), 10*time.Minute)
+	audience := os.Getenv("FEATURE_VOTE_AUDIENCE") // optional; must equal FV_AUDIENCE when that is set
+	token := MintFeatureVoteToken(secret, issuer, audience, user.ID, user.HasPaidPlan(), 10*time.Minute)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
@@ -182,7 +191,8 @@ e.GET("/api/feature-vote/token", func(c echo.Context) error {
 		issuer = "okokumo"
 	}
 	return c.JSON(http.StatusOK, map[string]string{
-		"token": MintFeatureVoteToken(secret, issuer, user.ID, user.HasPaidPlan(), 10*time.Minute),
+		"token": MintFeatureVoteToken(secret, issuer, os.Getenv("FEATURE_VOTE_AUDIENCE"),
+			user.ID, user.HasPaidPlan(), 10*time.Minute),
 	})
 })
 ```
@@ -199,9 +209,11 @@ module FeatureVoteToken
   TTL = 600 # seconds; FeatureVote rejects tokens living longer than 15 minutes
 
   # sub: opaque, stable user id (never an email). voter: the host's eligibility decision.
-  def self.mint(secret:, issuer:, sub:, voter:, ttl: TTL)
+  # audience: the instance's FV_AUDIENCE (FEATURE_VOTE_AUDIENCE on the host); nil/"" omits aud.
+  def self.mint(secret:, issuer:, sub:, voter:, ttl: TTL, audience: nil)
     now = Time.now.to_i
     payload = { iss: issuer, sub: sub.to_s, voter: voter == true, iat: now, exp: now + ttl }
+    payload[:aud] = audience.to_s unless audience.to_s.empty?
     JWT.encode(payload, secret, "HS256")
   end
 end
@@ -223,7 +235,8 @@ class FeatureVoteController < ApplicationController
       secret: secret,
       issuer: ENV.fetch("FEATURE_VOTE_ISSUER", "doloop"),
       sub: current_user.id.to_s,
-      voter: true # DoLoop: every signed-in user may vote
+      voter: true, # DoLoop: every signed-in user may vote
+      audience: ENV["FEATURE_VOTE_AUDIENCE"] # optional; must equal FV_AUDIENCE when that is set
     )
     render json: { token: token }
   end
@@ -347,6 +360,7 @@ Product repos use these names:
 | `FEATURE_VOTE_URL` | base URL of the product's FeatureVote instance, e.g. `https://feedback.okokumo.com` (used to build the `<script src>`) |
 | `FEATURE_VOTE_SECRET` | shared HMAC secret; **must equal** the instance's `FV_HOST_SECRET` (≥ 32 bytes) |
 | `FEATURE_VOTE_ISSUER` | optional; defaults to the product name (`okokumo`, `doloop`); must equal `FV_HOST_ISSUER` |
+| `FEATURE_VOTE_AUDIENCE` | optional; sent as `aud`; must equal the instance's `FV_AUDIENCE` when that is set (recommended: the instance host name, e.g. `feedback.okokumo.com`) |
 
 When `FEATURE_VOTE_URL` or `FEATURE_VOTE_SECRET` is unset: the token endpoint returns `404`, the widget
 `<script>` is not injected, and **boot and build never fail**. FeatureVote is always optional for the host.
@@ -360,6 +374,7 @@ Environment only; the service refuses to start with a clear message on any inval
 | `FV_DATABASE_URL` | **required** | Postgres URL; migrations run at boot |
 | `FV_HOST_SECRET` | **required** | ≥ 32 bytes; same value as the host's `FEATURE_VOTE_SECRET` |
 | `FV_HOST_ISSUER` | **required** | expected `iss`, e.g. `okokumo` |
+| `FV_AUDIENCE` | empty | expected `aud`, e.g. `feedback.okokumo.com` (≤ 255 bytes). When set, every token must carry it; empty disables the check. Roll out by setting the host's `FEATURE_VOTE_AUDIENCE` first, then this |
 | `FV_ADMIN_TOKEN` | **required** | ≥ 32 bytes, must differ from `FV_HOST_SECRET` |
 | `FV_ALLOWED_ORIGINS` | empty | comma-separated exact origins allowed to call `/v1/*` from browsers |
 | `FV_LISTEN_ADDR` | `:8080` | |

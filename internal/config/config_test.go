@@ -26,8 +26,17 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.ListenAddr != ":8080" || c.SubmitLimitPerDay != 5 || c.VoteLimitPerMinute != 30 ||
-		c.ClockSkew != 30*time.Second || !c.CookieSecure || len(c.AllowedOrigins) != 0 {
+		c.ClockSkew != 30*time.Second || !c.CookieSecure || len(c.AllowedOrigins) != 0 || c.Audience != "" {
 		t.Fatalf("unexpected defaults: %+v", c)
+	}
+}
+
+func TestLoadAudience(t *testing.T) {
+	m := validEnv()
+	m["FV_AUDIENCE"] = "  feedback.okokumo.com "
+	c, err := Load(env(m))
+	if err != nil || c.Audience != "feedback.okokumo.com" {
+		t.Fatalf("audience = %q, %v", c.Audience, err)
 	}
 }
 
@@ -73,6 +82,7 @@ func TestLoadErrors(t *testing.T) {
 		{"bad skew", func(m map[string]string) { m["FV_CLOCK_SKEW"] = "30" }, "FV_CLOCK_SKEW"},
 		{"skew too large", func(m map[string]string) { m["FV_CLOCK_SKEW"] = "3m" }, "between 0 and 2m0s"},
 		{"bad cookie secure", func(m map[string]string) { m["FV_COOKIE_SECURE"] = "maybe" }, "FV_COOKIE_SECURE"},
+		{"audience too long", func(m map[string]string) { m["FV_AUDIENCE"] = strings.Repeat("a", 256) }, "FV_AUDIENCE must be at most 255 bytes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

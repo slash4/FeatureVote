@@ -14,9 +14,12 @@ import (
 
 // Config is the validated service configuration.
 type Config struct {
-	DatabaseURL        string
-	HostSecret         string
-	HostIssuer         string
+	DatabaseURL string
+	HostSecret  string
+	HostIssuer  string
+	// Audience, when set, is the aud every host token must carry
+	// (FV_AUDIENCE). Empty disables the check.
+	Audience           string
 	AdminToken         string
 	AllowedOrigins     []string
 	ListenAddr         string
@@ -30,8 +33,9 @@ type Config struct {
 }
 
 const (
-	minSecretLen = 32
-	maxClockSkew = 2 * time.Minute
+	minSecretLen   = 32
+	maxClockSkew   = 2 * time.Minute
+	maxAudienceLen = 255
 )
 
 // Load reads the configuration through getenv (usually os.Getenv) and
@@ -41,6 +45,7 @@ func Load(getenv func(string) string) (Config, error) {
 		DatabaseURL:        strings.TrimSpace(getenv("FV_DATABASE_URL")),
 		HostSecret:         getenv("FV_HOST_SECRET"),
 		HostIssuer:         strings.TrimSpace(getenv("FV_HOST_ISSUER")),
+		Audience:           strings.TrimSpace(getenv("FV_AUDIENCE")),
 		AdminToken:         getenv("FV_ADMIN_TOKEN"),
 		ListenAddr:         ":8080",
 		SubmitLimitPerDay:  5,
@@ -61,6 +66,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if c.HostIssuer == "" {
 		add("FV_HOST_ISSUER is required (e.g. \"okokumo\")")
+	}
+	if len(c.Audience) > maxAudienceLen {
+		add("FV_AUDIENCE must be at most %d bytes (got %d)", maxAudienceLen, len(c.Audience))
 	}
 	if c.AdminToken == "" {
 		add("FV_ADMIN_TOKEN is required")
