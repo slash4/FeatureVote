@@ -19,7 +19,8 @@ import (
 const (
 	adminCookie     = "fv_admin"
 	adminSessionTTL = 12 * time.Hour
-	// adminLoginPerMinute caps /admin/login attempts per client IP.
+	// adminLoginPerMinute caps /admin/login attempts and failed /v1/admin/*
+	// bearer attempts (one shared bucket) per client IP.
 	adminLoginPerMinute = 5
 )
 

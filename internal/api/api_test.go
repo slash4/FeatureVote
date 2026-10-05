@@ -781,6 +781,7 @@ func TestCORS(t *testing.T) {
 func TestAdminAuth(t *testing.T) {
 	e := newEnv(t)
 	for _, tok := range []string{"", "wrong", hostSecret, adminToken + "x"} {
+		e.clock.Advance(61 * time.Second) // 3 failures per round: stay under the throttle
 		e.mustErr(e.do("GET", "/v1/admin/ideas", tok, nil), 401, "unauthorized")
 		e.mustErr(e.do("POST", "/v1/admin/ideas/1/approve", tok, nil), 401, "unauthorized")
 		e.mustErr(e.do("DELETE", "/v1/admin/users/bob", tok, nil), 401, "unauthorized")
@@ -1167,6 +1168,48 @@ func TestAdminLoginThrottle(t *testing.T) {
 		// ...and a different client is not locked out by the attacker.
 		if res := login(e, adminToken, "X-Forwarded-For", "198.51.100.8"); res.StatusCode != http.StatusSeeOther {
 			t.Fatalf("other client = %d, want 303", res.StatusCode)
+		}
+	})
+}
+
+// Failed bearer attempts on /v1/admin/* share the /admin/login bucket (5 per
+// minute per IP); successful requests are not counted.
+func TestAdminAPIThrottle(t *testing.T) {
+	t.Run("failures only", func(t *testing.T) {
+		e := newEnv(t)
+		for i := 0; i < 20; i++ { // successes never fill the bucket
+			e.must(e.do("GET", "/v1/admin/ideas", adminToken, nil), 200)
+		}
+		for i := 0; i < 5; i++ {
+			e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil), 401, "unauthorized")
+		}
+		r := e.do("GET", "/v1/admin/ideas", "wrong", nil)
+		e.mustErr(r, 429, "rate_limited")
+		if ra, _ := strconv.Atoi(r.header.Get("Retry-After")); ra < 1 || ra > 60 {
+			t.Fatalf("Retry-After = %q", r.header.Get("Retry-After"))
+		}
+		// Throttled means throttled: the right token must not reveal itself
+		// with a 200 while the bucket is full.
+		e.mustErr(e.do("DELETE", "/v1/admin/users/bob", adminToken, nil), 429, "rate_limited")
+		e.mustErr(e.do("GET", "/v1/admin/ideas", "", nil), 429, "rate_limited")
+		e.clock.Advance(61 * time.Second)
+		e.must(e.do("GET", "/v1/admin/ideas", adminToken, nil), 200)
+	})
+
+	t.Run("shared with /admin/login", func(t *testing.T) {
+		e := newEnv(t)
+		for i := 0; i < 3; i++ {
+			res, _ := postForm(t, adminClient(t), e.srv.URL+"/admin/login", url.Values{"token": {"wrong"}})
+			if res.StatusCode != 401 {
+				t.Fatalf("login %d = %d, want 401", i+1, res.StatusCode)
+			}
+		}
+		e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil), 401, "unauthorized")
+		e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil), 401, "unauthorized")
+		e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil), 429, "rate_limited")
+		res, _ := postForm(t, adminClient(t), e.srv.URL+"/admin/login", url.Values{"token": {adminToken}})
+		if res.StatusCode != 429 {
+			t.Fatalf("login after API failures = %d, want 429", res.StatusCode)
 		}
 	})
 }

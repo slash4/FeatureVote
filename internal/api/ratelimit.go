@@ -94,3 +94,24 @@ func (l *slidingWindow) allow(key string, now time.Time) (bool, time.Duration) {
 	l.hits[key] = append(ts, now)
 	return true, 0
 }
+
+// undo takes back the hit allow recorded for key at at. Callers that only
+// count failures reserve a slot with allow before checking (so concurrent
+// guesses cannot overshoot the limit) and give it back on success.
+func (l *slidingWindow) undo(key string, at time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	ts := l.hits[key]
+	for i := len(ts) - 1; i >= 0; i-- {
+		if ts[i].Equal(at) {
+			ts = append(ts[:i], ts[i+1:]...)
+			if len(ts) == 0 {
+				delete(l.hits, key)
+			} else {
+				l.hits[key] = ts
+			}
+			return
+		}
+	}
+}

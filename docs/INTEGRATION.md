@@ -382,7 +382,7 @@ Environment only; the service refuses to start with a clear message on any inval
 | `FV_VOTE_LIMIT_PER_MINUTE` | `30` | vote PUT+DELETE per user per minute (in-memory, per process) |
 | `FV_CLOCK_SKEW` | `30s` | Go duration, max `2m` |
 | `FV_COOKIE_SECURE` | `true` | set `false` only for plain-HTTP local dev (admin page cookie) |
-| `FV_TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed when deriving the client IP (admin login throttle: 5 attempts/min/IP). Default fits a reverse proxy on the same host (Caddy); `none` trusts no proxy |
+| `FV_TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed when deriving the client IP (admin throttle: 5 `/admin/login` attempts plus failed `/v1/admin/*` token attempts per minute per IP). Default fits a reverse proxy on the same host (Caddy); `none` trusts no proxy |
 
 Generate secrets with `openssl rand -hex 32`.
 
@@ -414,6 +414,9 @@ host token endpoint is same-origin, so it is covered by `connect-src 'self'`.
 ## 9. Administration
 
 All admin calls use `Authorization: Bearer $FV_ADMIN_TOKEN`. Missing/wrong token → `401 unauthorized`.
+Failed token attempts share the `/admin/login` bucket (5 per minute per client IP); once it is full,
+every admin call from that IP gets `429 rate_limited` with `Retry-After`, even with the right token.
+Successful calls are not counted, so scripts can make as many as they need.
 
 ```sh
 FV=https://feedback.okokumo.com
@@ -522,5 +525,5 @@ Errors: `{"error":{"code":"<code>","message":"<english developer message>"}}`. M
 | 409 | `voting_closed` | idea is `shipped` or `declined` (cast and remove) |
 | 409 | `has_merged_ideas` | admin delete of an idea other ideas are merged into, without `?cascade=true` |
 | 413 | `payload_too_large` | body > 16 KiB |
-| 429 | `rate_limited` | submit or vote limit; honour `Retry-After` (seconds) |
+| 429 | `rate_limited` | submit or vote limit, or 5 failed admin token attempts in a minute from one IP; honour `Retry-After` (seconds) |
 | 500 | `internal` | server error |

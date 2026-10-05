@@ -21,13 +21,29 @@ func (s *Server) adminTokenOK(tok string) bool {
 }
 
 // adminAPI requires Authorization: Bearer $FV_ADMIN_TOKEN.
+//
+// Failed attempts share the per-IP bucket of /admin/login (5 per minute), so
+// the API is not a side door for guessing the token. Successful requests are
+// not counted: a slot is reserved before the check (concurrent guesses cannot
+// overshoot) and given back when the token matches. Once the bucket is full,
+// every request from that IP gets 429 until it drains, the right token
+// included; otherwise 200-vs-429 would still tell a guesser when it hit.
 func (s *Server) adminAPI(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ip, now := s.clientIP(r), s.now()
+		if ok, retry := s.loginLimit.allow(ip, now); !ok {
+			s.log.Warn("admin api throttled", "ip", ip)
+			w.Header().Set("Retry-After", retryAfterSeconds(retry))
+			writeError(w, http.StatusTooManyRequests, codeRateLimited, "too many failed admin token attempts; retry later")
+			return
+		}
 		scheme, tok, _ := strings.Cut(r.Header.Get("Authorization"), " ")
 		if !strings.EqualFold(scheme, "Bearer") || !s.adminTokenOK(strings.TrimSpace(tok)) {
+			s.log.Warn("admin api token rejected", "ip", ip)
 			writeError(w, http.StatusUnauthorized, codeUnauthorized, "admin token required")
 			return
 		}
+		s.loginLimit.undo(ip, now)
 		next(w, r)
 	}
 }
