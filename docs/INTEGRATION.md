@@ -379,7 +379,7 @@ Environment only; the service refuses to start with a clear message on any inval
 | `FV_ALLOWED_ORIGINS` | empty | comma-separated exact origins allowed to call `/v1/*` from browsers |
 | `FV_LISTEN_ADDR` | `:8080` | |
 | `FV_SUBMIT_LIMIT_PER_DAY` | `5` | ideas per user per trailing 24 h (counted in the database) |
-| `FV_VOTE_LIMIT_PER_MINUTE` | `30` | vote PUT+DELETE per user per minute (in-memory, per process) |
+| `FV_VOTE_LIMIT_PER_MINUTE` | `30` | vote PUT+DELETE per user per minute (in-memory, per process; tracks up to 10,000 voters a minute, beyond that new voters get `429` until the oldest age out) |
 | `FV_CLOCK_SKEW` | `30s` | Go duration, max `2m` |
 | `FV_COOKIE_SECURE` | `true` | set `false` only for plain-HTTP local dev (admin page cookie) |
 | `FV_TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed when deriving the client IP (admin throttle: 5 `/admin/login` attempts plus failed `/v1/admin/*` token attempts per minute per IP; IPv6 clients are bucketed by /64). Default fits a reverse proxy on the same host (Caddy); `none` trusts no proxy |
@@ -429,6 +429,15 @@ All admin calls use `Authorization: Bearer $FV_ADMIN_TOKEN`. Missing/wrong token
 Failed token attempts share the `/admin/login` bucket (5 per minute per client IP); once it is full,
 every admin call from that IP gets `429 rate_limited` with `Retry-After`, even with the right token.
 Successful calls are not counted, so scripts can make as many as they need.
+
+The throttle tracks up to 10,000 client keys (an IPv4 address or an IPv6 /64) in memory. If more are
+active within a minute, for example an attacker spreading guesses over a whole IPv6 /48, the least
+recently used key is dropped, so a new client always gets its own five attempts. This keeps admins
+from being locked out by a flood of addresses. The trade-off: an attacker with more than 10,000
+addresses can reset its own buckets, so guessing is then bounded only by request rate. That is why
+`FV_ADMIN_TOKEN` must be at least 32 bytes: generate it with `openssl rand -hex 32` and the throttle
+stays defence in depth. A `rate limiter full; evicting least recently used clients` warning in the
+log means such a flood is happening.
 
 ```sh
 FV=https://feedback.okokumo.com

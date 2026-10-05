@@ -1241,6 +1241,34 @@ func TestAdminAPIThrottle(t *testing.T) {
 			t.Fatalf("login after API failures = %d, want 429", res.StatusCode)
 		}
 	})
+
+	// An attacker holding more /64s than the limiter tracks (10k; one /48 is
+	// 65,536) must not lock admins out: a full table evicts its least
+	// recently used key, so a newcomer still gets its own 5-per-minute bucket.
+	t.Run("full key table does not lock admins out", func(t *testing.T) {
+		e := newEnv(t, func(c *config.Config) { c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")} })
+		v6 := func(n, host int) string { return fmt.Sprintf("2001:db8:%x:%x::%x", n>>16, n&0xffff, host) }
+		const flood = 10000 + 50 // more distinct /64s than limiterMaxKeys
+		for i := 0; i < flood; i++ {
+			if r := e.do("GET", "/v1/admin/ideas", "wrong", nil, "X-Forwarded-For", v6(i, 1)); r.status != 401 {
+				t.Fatalf("flood request %d = %d, want 401", i+1, r.status)
+			}
+		}
+		admin := v6(1<<20, 1) // a /64 the flood never used
+		e.must(e.do("GET", "/v1/admin/ideas", adminToken, nil, "X-Forwarded-For", admin), 200)
+		res, _ := postForm(t, adminClient(t), e.srv.URL+"/admin/login", url.Values{"token": {adminToken}}, "X-Forwarded-For", v6(1<<20+1, 1))
+		if res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("admin login while table full = %d, want 303", res.StatusCode)
+		}
+		// Throttling is still per key: a newcomer guessing gets 5 tries, then 429.
+		guesser := v6(1<<20+2, 1)
+		for i := 0; i < 5; i++ {
+			e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil, "X-Forwarded-For", guesser), 401, "unauthorized")
+		}
+		e.mustErr(e.do("GET", "/v1/admin/ideas", adminToken, nil, "X-Forwarded-For", guesser), 429, "rate_limited")
+		// ...and the admin, whose successes left no entry, is unaffected.
+		e.must(e.do("GET", "/v1/admin/ideas", adminToken, nil, "X-Forwarded-For", admin), 200)
+	})
 }
 
 // The /admin flash used to echo free text from ?msg=, so a crafted link

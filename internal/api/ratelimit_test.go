@@ -49,7 +49,7 @@ func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, n
 
 func TestSlidingWindowCapFailsClosed(t *testing.T) {
 	const max = 100
-	l := newSlidingWindow("test", 5, time.Minute, max, quietLog())
+	l := newSlidingWindow("test", 5, time.Minute, max, refuseNew, quietLog())
 	t0 := time.Unix(1_800_000_000, 0)
 	for i := 0; i < max; i++ {
 		if ok, _ := l.allow(fmt.Sprintf("k%d", i), t0.Add(time.Duration(i)*time.Millisecond)); !ok {
@@ -83,7 +83,7 @@ func TestSlidingWindowCapFailsClosed(t *testing.T) {
 }
 
 func TestSlidingWindowManyKeys(t *testing.T) {
-	l := newSlidingWindow("test", 5, time.Minute, limiterMaxKeys, quietLog())
+	l := newSlidingWindow("test", 5, time.Minute, limiterMaxKeys, refuseNew, quietLog())
 	t0 := time.Unix(1_800_000_000, 0)
 	admitted := 0
 	for i := 0; i < 5*limiterMaxKeys; i++ {
@@ -100,7 +100,7 @@ func TestSlidingWindowManyKeys(t *testing.T) {
 		t.Fatalf("admitted %d distinct keys within one window, want %d", admitted, limiterMaxKeys)
 	}
 	// Addresses inside one /64 share a bucket.
-	l = newSlidingWindow("test", 5, time.Minute, limiterMaxKeys, quietLog())
+	l = newSlidingWindow("test", 5, time.Minute, limiterMaxKeys, refuseNew, quietLog())
 	for i := 0; i < 5; i++ {
 		ip := netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, 15: byte(i + 1)}).String()
 		if ok, _ := l.allow(throttleKey(ip), t0); !ok {
@@ -115,8 +115,57 @@ func TestSlidingWindowManyKeys(t *testing.T) {
 	}
 }
 
+// evictOldest (the admin throttle): a full table never refuses a new key; it
+// drops the least recently used one, and per-key limits still hold.
+func TestSlidingWindowEvictOldest(t *testing.T) {
+	const max = 100
+	l := newSlidingWindow("test", 5, time.Minute, max, evictOldest, quietLog())
+	t0 := time.Unix(1_800_000_000, 0)
+	for i := 0; i < max; i++ {
+		if ok, _ := l.allow(fmt.Sprintf("k%d", i), t0.Add(time.Duration(i)*time.Millisecond)); !ok {
+			t.Fatalf("key %d refused below the cap", i)
+		}
+	}
+	now := t0.Add(2 * time.Second)
+	if ok, _ := l.allow("k0", now); !ok { // k0 is now the most recently used
+		t.Fatal("tracked key refused")
+	}
+	if ok, _ := l.allow("new", now); !ok {
+		t.Fatal("new key refused while full; want the oldest evicted")
+	}
+	if n := len(l.hits); n != max {
+		t.Fatalf("len(hits) = %d, want %d", n, max)
+	}
+	if _, ok := l.hits["k1"]; ok {
+		t.Fatal("k1 (least recently used) was not evicted")
+	}
+	if _, ok := l.hits["k0"]; !ok {
+		t.Fatal("k0 was evicted although it was used most recently")
+	}
+	// The new key gets a normal bucket: 5 hits, then refused.
+	for i := 0; i < 4; i++ {
+		if ok, _ := l.allow("new", now); !ok {
+			t.Fatalf("new key refused at hit %d", i+2)
+		}
+	}
+	if ok, retry := l.allow("new", now); ok || retry <= 0 || retry > time.Minute {
+		t.Fatalf("6th hit: ok=%v retry=%v, want refused with retry in (0, 1m]", ok, retry)
+	}
+	// A flood of distinct keys never grows the table and never refuses a newcomer.
+	for i := 0; i < 5*max; i++ {
+		if ok, _ := l.allow(fmt.Sprintf("flood%d", i), now); !ok {
+			t.Fatalf("flood key %d refused", i)
+		}
+		if len(l.hits) != max || l.lru.Len() != max {
+			t.Fatalf("after flood key %d: len(hits) = %d, lru = %d, want %d", i, len(l.hits), l.lru.Len(), max)
+		}
+	}
+	// Undo of an evicted key is a no-op, not a panic.
+	l.undo("k0", now)
+}
+
 func TestSlidingWindowUndo(t *testing.T) {
-	l := newSlidingWindow("test", 2, time.Minute, 10, quietLog())
+	l := newSlidingWindow("test", 2, time.Minute, 10, refuseNew, quietLog())
 	t0 := time.Unix(1_800_000_000, 0)
 	for i := 0; i < 10; i++ {
 		if ok, _ := l.allow("k", t0); !ok {
