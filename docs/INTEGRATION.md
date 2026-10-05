@@ -382,7 +382,7 @@ Environment only; the service refuses to start with a clear message on any inval
 | `FV_VOTE_LIMIT_PER_MINUTE` | `30` | vote PUT+DELETE per user per minute (in-memory, per process) |
 | `FV_CLOCK_SKEW` | `30s` | Go duration, max `2m` |
 | `FV_COOKIE_SECURE` | `true` | set `false` only for plain-HTTP local dev (admin page cookie) |
-| `FV_TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed when deriving the client IP (admin throttle: 5 `/admin/login` attempts plus failed `/v1/admin/*` token attempts per minute per IP). Default fits a reverse proxy on the same host (Caddy); `none` trusts no proxy |
+| `FV_TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed when deriving the client IP (admin throttle: 5 `/admin/login` attempts plus failed `/v1/admin/*` token attempts per minute per IP; IPv6 clients are bucketed by /64). Default fits a reverse proxy on the same host (Caddy); `none` trusts no proxy |
 
 Generate secrets with `openssl rand -hex 32`.
 

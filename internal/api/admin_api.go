@@ -31,7 +31,8 @@ func (s *Server) adminTokenOK(tok string) bool {
 func (s *Server) adminAPI(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip, now := s.clientIP(r), s.now()
-		if ok, retry := s.loginLimit.allow(ip, now); !ok {
+		key := throttleKey(ip)
+		if ok, retry := s.loginLimit.allow(key, now); !ok {
 			s.log.Warn("admin api throttled", "ip", ip)
 			w.Header().Set("Retry-After", retryAfterSeconds(retry))
 			writeError(w, http.StatusTooManyRequests, codeRateLimited, "too many failed admin token attempts; retry later")
@@ -43,7 +44,7 @@ func (s *Server) adminAPI(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, codeUnauthorized, "admin token required")
 			return
 		}
-		s.loginLimit.undo(ip, now)
+		s.loginLimit.undo(key, now)
 		next(w, r)
 	}
 }

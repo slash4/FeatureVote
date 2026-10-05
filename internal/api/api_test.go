@@ -1170,6 +1170,20 @@ func TestAdminLoginThrottle(t *testing.T) {
 			t.Fatalf("other client = %d, want 303", res.StatusCode)
 		}
 	})
+
+	t.Run("IPv6 clients share their /64", func(t *testing.T) {
+		e := newEnv(t, func(c *config.Config) { c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")} })
+		for i := 1; i <= 5; i++ {
+			login(e, "wrong", "X-Forwarded-For", fmt.Sprintf("2001:db8:1:2::%x", i))
+		}
+		// Rotating the interface ID inside the /64 does not escape the bucket.
+		if res := login(e, adminToken, "X-Forwarded-For", "2001:db8:1:2:dead:beef:0:1"); res.StatusCode != 429 {
+			t.Fatalf("same /64 = %d, want 429", res.StatusCode)
+		}
+		if res := login(e, adminToken, "X-Forwarded-For", "2001:db8:1:3::1"); res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("next /64 = %d, want 303", res.StatusCode)
+		}
+	})
 }
 
 // Failed bearer attempts on /v1/admin/* share the /admin/login bucket (5 per

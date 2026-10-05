@@ -232,7 +232,7 @@ func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 	// Throttle before looking at the token: every attempt counts, so a
 	// guesser gets 5 tries per minute per IP whatever the outcome.
 	ip := s.clientIP(r)
-	if ok, retry := s.loginLimit.allow(ip, s.now()); !ok {
+	if ok, retry := s.loginLimit.allow(throttleKey(ip), s.now()); !ok {
 		s.log.Warn("admin login throttled", "ip", ip)
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		s.renderAdmin(w, http.StatusTooManyRequests, adminView{Error: "Too many login attempts. Wait a minute and try again."})

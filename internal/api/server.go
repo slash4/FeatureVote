@@ -67,8 +67,8 @@ func NewServer(opts Options) *Server {
 		Skew:     s.cfg.ClockSkew,
 		Now:      s.now,
 	}
-	s.voteLimit = newSlidingWindow(s.cfg.VoteLimitPerMinute, time.Minute)
-	s.loginLimit = newSlidingWindow(adminLoginPerMinute, time.Minute)
+	s.voteLimit = newSlidingWindow("vote", s.cfg.VoteLimitPerMinute, time.Minute, limiterMaxKeys, s.log)
+	s.loginLimit = newSlidingWindow("admin", adminLoginPerMinute, time.Minute, limiterMaxKeys, s.log)
 	s.origins = make(map[string]bool, len(s.cfg.AllowedOrigins))
 	for _, o := range s.cfg.AllowedOrigins {
 		s.origins[o] = true
