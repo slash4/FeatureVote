@@ -22,6 +22,7 @@ const (
 	codeOwnIdea         = "own_idea"
 	codeNotFound        = "not_found"
 	codeVotingClosed    = "voting_closed"
+	codeHasMergedIdeas  = "has_merged_ideas"
 	codeInvalidInput    = "invalid_input"
 	codePayloadTooLarge = "payload_too_large"
 	codeRateLimited     = "rate_limited"
@@ -85,11 +86,29 @@ func pathID(r *http.Request) (int64, bool) {
 	return id, err == nil && id > 0
 }
 
+// normalizeText converts CRLF and lone CR to LF (HTML textareas submit
+// CRLF) and reports whether s is free of C0 control characters other than
+// LF and TAB. NUL in particular is rejected by Postgres text columns (500).
+func normalizeText(s string) (string, bool) {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	for _, r := range s {
+		if r < 0x20 && r != '\n' && r != 0x09 {
+			return s, false
+		}
+	}
+	return s, true
+}
+
 // cleanTitle trims and validates a title (1..120 runes).
 func cleanTitle(s string) (string, string) {
 	s = strings.TrimSpace(s)
 	if !utf8.ValidString(s) {
 		return "", "title must be valid UTF-8"
+	}
+	s, ok := normalizeText(s)
+	if !ok {
+		return "", "title must not contain control characters"
 	}
 	n := utf8.RuneCountInString(s)
 	if n < 1 || n > maxTitleRunes {
@@ -103,6 +122,10 @@ func cleanBody(s string) (string, string) {
 	s = strings.TrimSpace(s)
 	if !utf8.ValidString(s) {
 		return "", "body must be valid UTF-8"
+	}
+	s, ok := normalizeText(s)
+	if !ok {
+		return "", "body must not contain control characters"
 	}
 	if utf8.RuneCountInString(s) > maxBodyRunes {
 		return "", "body must be at most 2000 characters"

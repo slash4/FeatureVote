@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/slash4/featurevote/internal/hosttoken"
@@ -30,6 +31,7 @@ func main() {
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	secret, issuer := os.Getenv("FV_HOST_SECRET"), os.Getenv("FV_HOST_ISSUER")
+	audience := strings.TrimSpace(os.Getenv("FV_AUDIENCE")) // optional, sent as aud
 	if secret == "" || issuer == "" {
 		log.Error("FV_HOST_SECRET and FV_HOST_ISSUER must be set")
 		os.Exit(1)
@@ -68,8 +70,12 @@ func main() {
 		if c, err := r.Cookie("demo_voter"); err == nil {
 			voter, _ = strconv.ParseBool(c.Value)
 		}
+		now := time.Now()
 		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"token": hosttoken.Mint(secret, issuer, user.Value, voter, tokenTTL),
+			"token": hosttoken.Encode(secret, hosttoken.Claims{
+				Issuer: issuer, Subject: user.Value, Audience: audience, Voter: voter,
+				IssuedAt: now, ExpiresAt: now.Add(tokenTTL),
+			}),
 		})
 	})
 

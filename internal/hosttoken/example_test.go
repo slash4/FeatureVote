@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,18 +21,23 @@ import (
 
 // MintFeatureVoteToken returns a short-lived HS256 JWT identifying the
 // current user to FeatureVote. sub must be an opaque, stable user id (never an
-// email); voter is the host's eligibility decision.
-func MintFeatureVoteToken(secret, issuer, sub string, voter bool, ttl time.Duration) string {
+// email); voter is the host's eligibility decision. audience is the
+// instance's FV_AUDIENCE (FEATURE_VOTE_AUDIENCE on the host); "" omits aud.
+func MintFeatureVoteToken(secret, issuer, audience, sub string, voter bool, ttl time.Duration) string {
 	enc := base64.RawURLEncoding
 	now := time.Now()
 	header := enc.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	claims, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"iss":   issuer,
 		"sub":   sub,
 		"voter": voter,
 		"iat":   now.Unix(),
 		"exp":   now.Add(ttl).Unix(),
-	})
+	}
+	if audience != "" {
+		payload["aud"] = audience
+	}
+	claims, _ := json.Marshal(payload)
 	signingInput := header + "." + enc.EncodeToString(claims)
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(signingInput))
@@ -43,7 +49,7 @@ func MintFeatureVoteToken(secret, issuer, sub string, voter bool, ttl time.Durat
 func TestIntegrationDocGoSnippet(t *testing.T) {
 	v := &Verifier{Secret: []byte(secret), Issuer: issuer, Skew: 30 * time.Second}
 	for _, voter := range []bool{true, false} {
-		tok := MintFeatureVoteToken(secret, issuer, "usr_8f2c", voter, 10*time.Minute)
+		tok := MintFeatureVoteToken(secret, issuer, "", "usr_8f2c", voter, 10*time.Minute)
 		c, err := v.Verify(tok)
 		if err != nil {
 			t.Fatalf("doc snippet token rejected: %v", err)
@@ -51,6 +57,15 @@ func TestIntegrationDocGoSnippet(t *testing.T) {
 		if c.Subject != "usr_8f2c" || c.Voter != voter {
 			t.Fatalf("claims = %+v", c)
 		}
+	}
+	// With an audience on both sides the token is accepted; a token minted
+	// for another instance is not.
+	v.Audience = "feedback.okokumo.com"
+	if _, err := v.Verify(MintFeatureVoteToken(secret, issuer, "feedback.okokumo.com", "usr_8f2c", true, 10*time.Minute)); err != nil {
+		t.Fatalf("doc snippet token with aud rejected: %v", err)
+	}
+	if _, err := v.Verify(MintFeatureVoteToken(secret, issuer, "feedback.getdoloop.com", "usr_8f2c", true, 10*time.Minute)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("foreign aud: err = %v, want ErrInvalid", err)
 	}
 	// And the doc-recommended TTL must never exceed the service maximum.
 	if 10*time.Minute > MaxLifetime {

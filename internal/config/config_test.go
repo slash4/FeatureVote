@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -25,8 +26,17 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.ListenAddr != ":8080" || c.SubmitLimitPerDay != 5 || c.VoteLimitPerMinute != 30 ||
-		c.ClockSkew != 30*time.Second || !c.CookieSecure || len(c.AllowedOrigins) != 0 {
+		c.ClockSkew != 30*time.Second || !c.CookieSecure || len(c.AllowedOrigins) != 0 || c.Audience != "" {
 		t.Fatalf("unexpected defaults: %+v", c)
+	}
+}
+
+func TestLoadAudience(t *testing.T) {
+	m := validEnv()
+	m["FV_AUDIENCE"] = "  feedback.okokumo.com "
+	c, err := Load(env(m))
+	if err != nil || c.Audience != "feedback.okokumo.com" {
+		t.Fatalf("audience = %q, %v", c.Audience, err)
 	}
 }
 
@@ -72,6 +82,7 @@ func TestLoadErrors(t *testing.T) {
 		{"bad skew", func(m map[string]string) { m["FV_CLOCK_SKEW"] = "30" }, "FV_CLOCK_SKEW"},
 		{"skew too large", func(m map[string]string) { m["FV_CLOCK_SKEW"] = "3m" }, "between 0 and 2m0s"},
 		{"bad cookie secure", func(m map[string]string) { m["FV_COOKIE_SECURE"] = "maybe" }, "FV_COOKIE_SECURE"},
+		{"audience too long", func(m map[string]string) { m["FV_AUDIENCE"] = strings.Repeat("a", 256) }, "FV_AUDIENCE must be at most 255 bytes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,6 +93,32 @@ func TestLoadErrors(t *testing.T) {
 				t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestTrustedProxies(t *testing.T) {
+	c, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(c.TrustedProxies) != "[127.0.0.0/8 ::1/128]" {
+		t.Fatalf("default trusted proxies = %v", c.TrustedProxies)
+	}
+	m := validEnv()
+	m["FV_TRUSTED_PROXIES"] = " 10.0.0.0/8, 192.168.1.5 ,fd00::/8"
+	if c, err = Load(env(m)); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(c.TrustedProxies) != "[10.0.0.0/8 192.168.1.5/32 fd00::/8]" {
+		t.Fatalf("trusted proxies = %v", c.TrustedProxies)
+	}
+	m["FV_TRUSTED_PROXIES"] = "none"
+	if c, err = Load(env(m)); err != nil || len(c.TrustedProxies) != 0 {
+		t.Fatalf("none => %v, %v", c.TrustedProxies, err)
+	}
+	m["FV_TRUSTED_PROXIES"] = "10.0.0.0/8,proxy.local"
+	if _, err = Load(env(m)); err == nil || !strings.Contains(err.Error(), "FV_TRUSTED_PROXIES") {
+		t.Fatalf("bad proxy err = %v", err)
 	}
 }
 

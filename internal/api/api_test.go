@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -450,7 +452,7 @@ func TestTokenValidation(t *testing.T) {
 	id := e.approvedIdea("alice", "idea")
 	now := e.clock.Now()
 	exp := strconv.FormatInt(now.Add(5*time.Minute).Unix(), 10)
-	good := `{"iss":"okokumo","sub":"bob","voter":true,"exp":` + exp + `}`
+	good := `{"iss":"okokumo","sub":"bob","voter":true,"iat":` + strconv.FormatInt(now.Unix(), 10) + `,"exp":` + exp + `}`
 	hs := []byte(`{"alg":"HS256","typ":"JWT"}`)
 	enc := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	path := fmt.Sprintf("/v1/ideas/%d/vote", id)
@@ -467,6 +469,8 @@ func TestTokenValidation(t *testing.T) {
 		{"alg HS512", hosttoken.Sign(hostSecret, []byte(`{"alg":"HS512","typ":"JWT"}`), []byte(good)), "invalid_token"},
 		{"lifetime > 15m", hosttoken.MintAt(now, hostSecret, hostIssuer, "bob", true, 16*time.Minute), "invalid_token"},
 		{"missing sub", hosttoken.Sign(hostSecret, hs, []byte(`{"iss":"okokumo","voter":true,"exp":`+exp+`}`)), "invalid_token"},
+		{"missing iat", hosttoken.Sign(hostSecret, hs, []byte(`{"iss":"okokumo","sub":"bob","voter":true,"exp":`+exp+`}`)), "invalid_token"},
+		{"exp - iat > 15m", hosttoken.MintAt(now.Add(-5*time.Minute), hostSecret, hostIssuer, "bob", true, 16*time.Minute), "invalid_token"},
 		{"garbage", "garbage", "invalid_token"},
 	}
 	for _, tc := range cases {
@@ -493,6 +497,27 @@ func TestTokenValidation(t *testing.T) {
 	})
 }
 
+func TestTokenAudience(t *testing.T) {
+	const aud = "feedback.okokumo.com"
+	mint := func(e *env, a string) string {
+		now := e.clock.Now()
+		return hosttoken.Encode(hostSecret, hosttoken.Claims{Issuer: hostIssuer, Subject: "bob", Voter: true,
+			IssuedAt: now, ExpiresAt: now.Add(10 * time.Minute), Audience: a})
+	}
+	t.Run("FV_AUDIENCE set", func(t *testing.T) {
+		e := newEnv(t, func(c *config.Config) { c.Audience = aud })
+		e.must(e.do("GET", "/v1/me", mint(e, aud), nil), 200)
+		// A token for another instance sharing the secret is not replayable.
+		e.mustErr(e.do("GET", "/v1/me", mint(e, "feedback.getdoloop.com"), nil), 401, "invalid_token")
+		e.mustErr(e.do("GET", "/v1/me", mint(e, ""), nil), 401, "invalid_token")
+	})
+	t.Run("FV_AUDIENCE unset is backward compatible", func(t *testing.T) {
+		e := newEnv(t)
+		e.must(e.do("GET", "/v1/me", mint(e, ""), nil), 200)
+		e.must(e.do("GET", "/v1/me", mint(e, aud), nil), 200)
+	})
+}
+
 func TestVotingClosed(t *testing.T) {
 	e := newEnv(t)
 	id := e.approvedIdea("alice", "idea")
@@ -509,6 +534,27 @@ func TestVotingClosed(t *testing.T) {
 		t.Fatalf("status = %v", m["status"])
 	}
 	e.mustErr(e.do("PUT", fmt.Sprintf("/v1/admin/ideas/%d/status", id), adminToken, map[string]string{"status": "done"}), 400, "invalid_input")
+}
+
+// Scores on shipped/declined ideas are frozen: removing a vote is refused
+// exactly like casting one.
+func TestVotingClosedFreezesRemove(t *testing.T) {
+	e := newEnv(t)
+	id := e.approvedIdea("alice", "idea")
+	e.must(e.vote(id, "bob", 1), 200)
+	e.must(e.vote(id, "carol", -1), 200)
+	del := func(sub string) resp {
+		return e.do("DELETE", fmt.Sprintf("/v1/ideas/%d/vote", id), e.token(sub, true), nil)
+	}
+	for _, st := range []string{"shipped", "declined"} {
+		e.must(e.do("PUT", fmt.Sprintf("/v1/admin/ideas/%d/status", id), adminToken, map[string]string{"status": st}), 200)
+		e.mustErr(del("bob"), 409, "voting_closed")
+		e.mustErr(del("dave"), 409, "voting_closed") // no vote to remove: still closed
+		e.wantCounts(id, 1, 1, 0)
+	}
+	e.must(e.do("PUT", fmt.Sprintf("/v1/admin/ideas/%d/status", id), adminToken, map[string]string{"status": "in_progress"}), 200)
+	e.must(del("bob"), 200)
+	e.wantCounts(id, 0, 1, -1)
 }
 
 func TestMergeRecount(t *testing.T) {
@@ -582,12 +628,71 @@ func TestChainedMergeRepoints(t *testing.T) {
 	if into != c {
 		t.Fatalf("a.merged_into_id = %d, want %d", into, c)
 	}
-	// Deleting c cascades to the ideas merged into it.
-	e.must(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d", c), adminToken, nil), 204)
-	var n int
-	e.pool.QueryRow(context.Background(), `SELECT count(*) FROM ideas`).Scan(&n)
-	if n != 0 {
-		t.Fatalf("ideas left = %d, want 0", n)
+}
+
+// Deleting a merge target must not silently cascade-delete the ideas merged
+// into it: the API refuses with 409 unless ?cascade=true, the database
+// refuses too (ON DELETE RESTRICT, migration 0002), and /admin requires an
+// explicit confirmation checkbox.
+func TestDeleteMergeTarget(t *testing.T) {
+	e := newEnv(t)
+	a := e.approvedIdea("u1", "a")
+	b := e.approvedIdea("u2", "b")
+	c := e.approvedIdea("u3", "c")
+	e.must(e.do("POST", fmt.Sprintf("/v1/admin/ideas/%d/merge", a), adminToken, map[string]int64{"into_id": c}), 200)
+	e.must(e.do("POST", fmt.Sprintf("/v1/admin/ideas/%d/merge", b), adminToken, map[string]int64{"into_id": c}), 200)
+	count := func() int {
+		var n int
+		e.pool.QueryRow(context.Background(), `SELECT count(*) FROM ideas`).Scan(&n)
+		return n
+	}
+
+	r := e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d", c), adminToken, nil)
+	e.mustErr(r, 409, "has_merged_ideas")
+	if !strings.Contains(string(r.body), "2 merged") {
+		t.Fatalf("409 body should carry the count: %s", r.body)
+	}
+	e.mustErr(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d?cascade=false", c), adminToken, nil), 409, "has_merged_ideas")
+	if n := count(); n != 3 {
+		t.Fatalf("ideas after refused delete = %d, want 3", n)
+	}
+
+	// The schema itself refuses the cascade.
+	if _, err := e.pool.Exec(context.Background(), `DELETE FROM ideas WHERE id = $1`, c); err == nil {
+		t.Fatal("raw DELETE of a merge target succeeded; FK should be ON DELETE RESTRICT")
+	}
+
+	// A merged idea itself (no children) deletes normally.
+	e.must(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d", a), adminToken, nil), 204)
+	e.mustErr(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d?cascade=maybe", c), adminToken, nil), 400, "invalid_input")
+
+	// Explicit cascade deletes the target and the remaining merged idea.
+	e.must(e.do("DELETE", fmt.Sprintf("/v1/admin/ideas/%d?cascade=true", c), adminToken, nil), 204)
+	if n := count(); n != 0 {
+		t.Fatalf("ideas after cascade = %d, want 0", n)
+	}
+
+	// Admin HTML: the delete form warns with the count and needs confirmation.
+	x := e.approvedIdea("u4", "x")
+	y := e.approvedIdea("u5", "y")
+	e.must(e.do("POST", fmt.Sprintf("/v1/admin/ideas/%d/merge", y), adminToken, map[string]int64{"into_id": x}), 200)
+	hc, csrf := adminLogin(t, e)
+	_, page := getPage(t, hc, e.srv.URL+"/admin")
+	if !strings.Contains(page, `name="cascade"`) || !strings.Contains(page, "also delete 1 merged idea") {
+		t.Fatalf("admin page lacks the merged-ideas delete warning")
+	}
+	u := fmt.Sprintf("%s/admin/ideas/%d/delete", e.srv.URL, x)
+	res, _ := postForm(t, hc, u, url.Values{"csrf": {csrf}})
+	if res.StatusCode != http.StatusSeeOther || count() != 2 {
+		t.Fatalf("unconfirmed form delete: status %d, ideas %d", res.StatusCode, count())
+	}
+	_, page = getPage(t, hc, e.srv.URL+res.Header.Get("Location"))
+	if !strings.Contains(page, `class="error"`) {
+		t.Fatalf("unconfirmed delete shows no error flash")
+	}
+	res, _ = postForm(t, hc, u, url.Values{"csrf": {csrf}, "cascade": {"1"}})
+	if res.StatusCode != http.StatusSeeOther || count() != 0 {
+		t.Fatalf("confirmed form delete: status %d, ideas %d", res.StatusCode, count())
 	}
 }
 
@@ -763,6 +868,40 @@ func TestSizeLimits(t *testing.T) {
 	e.must(e.do("POST", "/v1/ideas", tok, `{"title":"fine","extra":true}`), 201)
 }
 
+// NUL and other C0 control characters used to reach Postgres (NUL => 500).
+// They are now a 400 everywhere a title or body is accepted; LF and TAB are
+// allowed and CR/CRLF is normalised to \n (HTML textareas submit CRLF).
+func TestControlCharacters(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.SubmitLimitPerDay = 100 })
+	tok := e.token("alice", true)
+	for _, bad := range []string{"\u0000", "\u0001", "\u0007", "\u0008", "\u000b", "\u001b", "\u001f"} {
+		jq, _ := json.Marshal(bad) // JSON escape, e.g. "\u0000"
+		esc := string(jq[1 : len(jq)-1])
+		e.mustErr(e.do("POST", "/v1/ideas", tok, `{"title":"a`+esc+`b"}`), 400, "invalid_input")
+		e.mustErr(e.do("POST", "/v1/ideas", tok, `{"title":"ok","body":"x`+esc+`y"}`), 400, "invalid_input")
+		e.mustErr(e.do("POST", "/v1/admin/ideas", adminToken, `{"title":"a`+esc+`b"}`), 400, "invalid_input")
+	}
+	const tab = "\x09"
+	r := e.must(e.do("POST", "/v1/ideas", tok, map[string]string{"title": "tab" + tab + "here", "body": "line1\r\nline2\rline3\n" + tab + "indented"}), 201).json(t)
+	if r["title"] != "tab"+tab+"here" || r["body"] != "line1\nline2\nline3\n"+tab+"indented" {
+		t.Fatalf("allowed whitespace mangled: %q / %q", r["title"], r["body"])
+	}
+	id := int64(r["id"].(float64))
+	e.mustErr(e.do("PATCH", fmt.Sprintf("/v1/admin/ideas/%d", id), adminToken, `{"body":"x\u0000"}`), 400, "invalid_input")
+
+	// Admin HTML form: rejected with an error flash, nothing stored.
+	c, csrf := adminLogin(t, e)
+	res, _ := postForm(t, c, e.srv.URL+"/admin/ideas", url.Values{"csrf": {csrf}, "title": {"nul\x00title"}})
+	if res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("admin form status = %d", res.StatusCode)
+	}
+	var n int
+	e.pool.QueryRow(context.Background(), `SELECT count(*) FROM ideas WHERE title LIKE 'nul%'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("control-char title stored")
+	}
+}
+
 func TestPublicJSONNeverLeaksAuthor(t *testing.T) {
 	e := newEnv(t)
 	id := e.approvedIdea("alice-secret-sub", "idea")
@@ -821,6 +960,13 @@ func TestListSortFilterPaging(t *testing.T) {
 	e.mustErr(e.do("GET", "/v1/ideas?status=bogus", "", nil), 400, "invalid_input")
 	e.mustErr(e.do("GET", "/v1/ideas?sort=hot", "", nil), 400, "invalid_input")
 	e.mustErr(e.do("GET", "/v1/ideas?limit=101", "", nil), 400, "invalid_input")
+	// offset is capped at 10000 (deep OFFSET scans are a cheap DoS).
+	if m := e.must(e.do("GET", "/v1/ideas?offset=10000", "", nil), 200).json(t); len(m["ideas"].([]any)) != 0 || m["total"].(float64) != 3 {
+		t.Fatalf("offset=10000 = %v", m)
+	}
+	e.mustErr(e.do("GET", "/v1/ideas?offset=10001", "", nil), 400, "invalid_input")
+	e.mustErr(e.do("GET", "/v1/ideas?offset=99999999999999999999", "", nil), 400, "invalid_input")
+	e.mustErr(e.do("GET", "/v1/ideas?offset=-1", "", nil), 400, "invalid_input")
 	e.mustErr(e.do("GET", "/v1/nope", "", nil), 404, "not_found")
 }
 
@@ -925,8 +1071,11 @@ func TestAdminHTMLLoginAndEscaping(t *testing.T) {
 		t.Fatalf("status = %v", m["status"])
 	}
 	res, _ = postForm(t, c, e.srv.URL+"/admin/users/delete", url.Values{"csrf": {csrf}, "sub": {"alice"}})
-	if res.StatusCode != http.StatusSeeOther || !strings.Contains(res.Header.Get("Location"), "anonymised") {
+	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != "/admin?k=1&m=user_deleted&n=0" {
 		t.Fatalf("gdpr form = %d %s", res.StatusCode, res.Header.Get("Location"))
+	}
+	if _, body = getPage(t, c, e.srv.URL+res.Header.Get("Location")); !strings.Contains(body, "User data deleted: 0 votes deleted, 1 idea anonymised.") {
+		t.Fatal("gdpr flash not rendered")
 	}
 
 	// Logout clears the session.
@@ -966,6 +1115,125 @@ func TestAdminHTMLCSRF(t *testing.T) {
 	res, _ = postForm(t, c, u, url.Values{"csrf": {csrf}}, "Origin", e.srv.URL)
 	if res.StatusCode != http.StatusSeeOther {
 		t.Fatalf("valid status = %d", res.StatusCode)
+	}
+}
+
+// /admin/login allows 5 attempts per client IP per minute (successful or
+// not); the 6th gets 429 + Retry-After without the token being checked.
+// X-Forwarded-For is honoured only when the direct peer is a trusted proxy.
+func TestAdminLoginThrottle(t *testing.T) {
+	login := func(e *env, tok string, headers ...string) *http.Response {
+		res, _ := postForm(t, adminClient(t), e.srv.URL+"/admin/login", url.Values{"token": {tok}}, headers...)
+		return res
+	}
+
+	t.Run("direct clients", func(t *testing.T) {
+		e := newEnv(t)
+		for i := 0; i < 5; i++ {
+			if res := login(e, "wrong"); res.StatusCode != 401 {
+				t.Fatalf("attempt %d = %d, want 401", i+1, res.StatusCode)
+			}
+		}
+		res := login(e, adminToken) // even the right token is throttled now
+		if res.StatusCode != 429 {
+			t.Fatalf("6th attempt = %d, want 429", res.StatusCode)
+		}
+		if ra, _ := strconv.Atoi(res.Header.Get("Retry-After")); ra < 1 || ra > 60 {
+			t.Fatalf("Retry-After = %q", res.Header.Get("Retry-After"))
+		}
+		// Untrusted peer: a spoofed X-Forwarded-For does not get a fresh bucket.
+		if res := login(e, adminToken, "X-Forwarded-For", "203.0.113.9"); res.StatusCode != 429 {
+			t.Fatalf("spoofed XFF = %d, want 429", res.StatusCode)
+		}
+		e.clock.Advance(61 * time.Second)
+		if res := login(e, adminToken); res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("after window = %d, want 303", res.StatusCode)
+		}
+	})
+
+	t.Run("behind a trusted proxy", func(t *testing.T) {
+		e := newEnv(t, func(c *config.Config) { c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")} })
+		for i := 0; i < 5; i++ {
+			login(e, "wrong", "X-Forwarded-For", "198.51.100.7")
+		}
+		if res := login(e, adminToken, "X-Forwarded-For", "198.51.100.7"); res.StatusCode != 429 {
+			t.Fatalf("attacker 6th = %d, want 429", res.StatusCode)
+		}
+		// The rightmost untrusted hop is the client: a forged leftmost entry
+		// does not escape the attacker's bucket...
+		if res := login(e, adminToken, "X-Forwarded-For", "192.0.2.1, 198.51.100.7"); res.StatusCode != 429 {
+			t.Fatalf("forged XFF prefix = %d, want 429", res.StatusCode)
+		}
+		// ...and a different client is not locked out by the attacker.
+		if res := login(e, adminToken, "X-Forwarded-For", "198.51.100.8"); res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("other client = %d, want 303", res.StatusCode)
+		}
+	})
+}
+
+// The /admin flash used to echo free text from ?msg=, so a crafted link
+// could show an admin any message (e.g. "Error: session compromised, paste
+// your token at evil.example"). Only fixed codes with typed parameters render.
+func TestAdminFlashCodesOnly(t *testing.T) {
+	e := newEnv(t)
+	c, csrf := adminLogin(t, e)
+	flashOf := func(query string) string {
+		t.Helper()
+		_, body := getPage(t, c, e.srv.URL+"/admin"+query)
+		m := regexp.MustCompile(`<p class="(?:flash|error)">([^<]*)</p>`).FindStringSubmatch(body)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	for _, q := range []string{
+		"?msg=" + url.QueryEscape("Error: session compromised, visit https://evil.example"),
+		"?m=" + url.QueryEscape("visit evil.example"),
+		"?m=status&id=1&status=" + url.QueryEscape("pwned, visit evil.example"),
+		"?m=approved&id=evil",
+		"?m=approved&id=0",
+		"?m=approved",
+		"?m=merged&id=1&into=2&n=-1&k=0",
+	} {
+		if f := flashOf(q); f != "" {
+			t.Errorf("%s rendered flash %q, want none", q, f)
+		}
+	}
+	if f := flashOf("?m=approved&id=7"); f != "Approved #7." {
+		t.Fatalf("approved flash = %q", f)
+	}
+	if f := flashOf("?m=status&id=7&status=planned"); f != "Status of #7 set to planned." {
+		t.Fatalf("status flash = %q", f)
+	}
+
+	// Every action redirects with a code, never free text; error codes render as errors.
+	id := e.submit("alice", "idea")
+	for _, tc := range []struct {
+		path string
+		form url.Values
+		want string
+	}{
+		{fmt.Sprintf("/admin/ideas/%d/approve", id), url.Values{}, "Approved #" + strconv.FormatInt(id, 10) + "."},
+		{fmt.Sprintf("/admin/ideas/%d/merge", id), url.Values{"into_id": {strconv.FormatInt(id, 10)}}, "Error: an idea cannot be merged into itself."},
+		{"/admin/ideas/999999/approve", url.Values{}, "Error: idea not found."},
+		{"/admin/ideas/abc/approve", url.Values{}, "Error: invalid idea id."},
+		{fmt.Sprintf("/admin/ideas/%d/status", id), url.Values{"status": {"nope"}}, "Error: unknown status."},
+		{"/admin/ideas", url.Values{"title": {""}}, "Error: the title must be 1 to 120 characters, without control characters."},
+	} {
+		tc.form.Set("csrf", csrf)
+		res, _ := postForm(t, c, e.srv.URL+tc.path, tc.form)
+		loc := res.Header.Get("Location")
+		if res.StatusCode != http.StatusSeeOther || strings.Contains(loc, "msg=") || !strings.Contains(loc, "m=") {
+			t.Fatalf("%s => %d %s", tc.path, res.StatusCode, loc)
+		}
+		_, body := getPage(t, c, e.srv.URL+loc)
+		cls := "flash"
+		if strings.HasPrefix(tc.want, "Error") {
+			cls = "error"
+		}
+		if !strings.Contains(body, `<p class="`+cls+`">`+template.HTMLEscapeString(tc.want)+`</p>`) {
+			t.Fatalf("%s: flash %q (class %s) missing; got %q", tc.path, tc.want, cls, flashOf(strings.TrimPrefix(loc, "/admin")))
+		}
 	}
 }
 

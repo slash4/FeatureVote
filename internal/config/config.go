@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -13,9 +14,12 @@ import (
 
 // Config is the validated service configuration.
 type Config struct {
-	DatabaseURL        string
-	HostSecret         string
-	HostIssuer         string
+	DatabaseURL string
+	HostSecret  string
+	HostIssuer  string
+	// Audience, when set, is the aud every host token must carry
+	// (FV_AUDIENCE). Empty disables the check.
+	Audience           string
 	AdminToken         string
 	AllowedOrigins     []string
 	ListenAddr         string
@@ -23,11 +27,15 @@ type Config struct {
 	VoteLimitPerMinute int
 	ClockSkew          time.Duration
 	CookieSecure       bool
+	// TrustedProxies are the peers whose X-Forwarded-For is believed when
+	// deriving the client IP (admin login throttle). Default: loopback.
+	TrustedProxies []netip.Prefix
 }
 
 const (
-	minSecretLen = 32
-	maxClockSkew = 2 * time.Minute
+	minSecretLen   = 32
+	maxClockSkew   = 2 * time.Minute
+	maxAudienceLen = 255
 )
 
 // Load reads the configuration through getenv (usually os.Getenv) and
@@ -37,6 +45,7 @@ func Load(getenv func(string) string) (Config, error) {
 		DatabaseURL:        strings.TrimSpace(getenv("FV_DATABASE_URL")),
 		HostSecret:         getenv("FV_HOST_SECRET"),
 		HostIssuer:         strings.TrimSpace(getenv("FV_HOST_ISSUER")),
+		Audience:           strings.TrimSpace(getenv("FV_AUDIENCE")),
 		AdminToken:         getenv("FV_ADMIN_TOKEN"),
 		ListenAddr:         ":8080",
 		SubmitLimitPerDay:  5,
@@ -57,6 +66,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if c.HostIssuer == "" {
 		add("FV_HOST_ISSUER is required (e.g. \"okokumo\")")
+	}
+	if len(c.Audience) > maxAudienceLen {
+		add("FV_AUDIENCE must be at most %d bytes (got %d)", maxAudienceLen, len(c.Audience))
 	}
 	if c.AdminToken == "" {
 		add("FV_ADMIN_TOKEN is required")
@@ -116,6 +128,27 @@ func Load(getenv func(string) string) (Config, error) {
 			add("FV_COOKIE_SECURE must be true or false (got %q)", v)
 		} else {
 			c.CookieSecure = b
+		}
+	}
+	c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+	if v := strings.TrimSpace(getenv("FV_TRUSTED_PROXIES")); v != "" {
+		c.TrustedProxies = nil
+		for _, p := range strings.Split(v, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" || (p == "none" && v == "none") {
+				continue
+			}
+			pfx, err := netip.ParsePrefix(p)
+			if err != nil {
+				if a, aerr := netip.ParseAddr(p); aerr == nil {
+					pfx, err = a.Prefix(a.BitLen())
+				}
+			}
+			if err != nil {
+				add("FV_TRUSTED_PROXIES: %q is not an IP or CIDR", p)
+				continue
+			}
+			c.TrustedProxies = append(c.TrustedProxies, pfx.Masked())
 		}
 	}
 

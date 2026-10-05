@@ -60,14 +60,23 @@ var (
 	ErrConflict = errors.New("invalid state")
 )
 
-// ConflictError wraps ErrConflict with a developer message.
-type ConflictError struct{ Msg string }
+// ConflictError wraps ErrConflict with a stable code (for callers that map
+// it to fixed messages) and a developer message.
+type ConflictError struct{ Code, Msg string }
+
+// Conflict codes.
+const (
+	ConflictTransition    = "transition"
+	ConflictSelfMerge     = "self_merge"
+	ConflictAlreadyMerged = "already_merged"
+	ConflictBadTarget     = "bad_target"
+)
 
 func (e *ConflictError) Error() string { return e.Msg }
 func (e *ConflictError) Unwrap() error { return ErrConflict }
 
-func conflict(format string, args ...any) error {
-	return &ConflictError{Msg: fmt.Sprintf(format, args...)}
+func conflict(code, format string, args ...any) error {
+	return &ConflictError{Code: code, Msg: fmt.Sprintf(format, args...)}
 }
 
 // RateLimitedError is returned when a submission limit is hit.
@@ -262,22 +271,26 @@ func (s *Store) CreateApproved(ctx context.Context, title, body, status string) 
 }
 
 // lockVotable locks an idea row (shared) and applies the voting rules common
-// to casting and removing a vote.
-func lockVotable(ctx context.Context, tx pgx.Tx, id int64, sub string) (status string, err error) {
-	var mod string
+// to casting and removing a vote: the idea must be approved, not authored by
+// sub, and not shipped/declined (their scores are frozen).
+func lockVotable(ctx context.Context, tx pgx.Tx, id int64, sub string) error {
+	var mod, status string
 	var author *string
-	err = tx.QueryRow(ctx, `SELECT moderation_state, status, author_sub FROM ideas WHERE id = $1 FOR SHARE`, id).
+	err := tx.QueryRow(ctx, `SELECT moderation_state, status, author_sub FROM ideas WHERE id = $1 FOR SHARE`, id).
 		Scan(&mod, &status, &author)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && mod != ModApproved) {
-		return "", ErrNotFound
+		return ErrNotFound
 	}
 	if err != nil {
-		return "", err
+		return err
 	}
 	if author != nil && *author == sub {
-		return "", ErrOwnIdea
+		return ErrOwnIdea
 	}
-	return status, nil
+	if status == StatusShipped || status == StatusDeclined {
+		return ErrVotingClosed
+	}
+	return nil
 }
 
 // CastVote sets sub's vote on an approved idea to value (+1 or -1). A repeat
@@ -285,29 +298,27 @@ func lockVotable(ctx context.Context, tx pgx.Tx, id int64, sub string) (status s
 func (s *Store) CastVote(ctx context.Context, id int64, sub string, value int) (Idea, error) {
 	var idea Idea
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		status, err := lockVotable(ctx, tx, id, sub)
-		if err != nil {
+		if err := lockVotable(ctx, tx, id, sub); err != nil {
 			return err
-		}
-		if status == StatusShipped || status == StatusDeclined {
-			return ErrVotingClosed
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO votes (idea_id, voter_sub, value) VALUES ($1, $2, $3)
 			ON CONFLICT (idea_id, voter_sub) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
 			id, sub, value); err != nil {
 			return err
 		}
+		var err error
 		idea, err = getIdea(ctx, tx, id)
 		return err
 	})
 	return idea, err
 }
 
-// RemoveVote deletes sub's vote on an approved idea (idempotent).
+// RemoveVote deletes sub's vote on an approved idea (idempotent). Like
+// CastVote it is refused on shipped/declined ideas.
 func (s *Store) RemoveVote(ctx context.Context, id int64, sub string) (Idea, error) {
 	var idea Idea
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if _, err := lockVotable(ctx, tx, id, sub); err != nil {
+		if err := lockVotable(ctx, tx, id, sub); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM votes WHERE idea_id = $1 AND voter_sub = $2`, id, sub); err != nil {
@@ -347,7 +358,7 @@ func (s *Store) transition(ctx context.Context, id int64, to string, from ...str
 				ok = ok || cur == f
 			}
 			if !ok {
-				return conflict("cannot move idea %d from %s to %s", id, cur, to)
+				return conflict(ConflictTransition, "cannot move idea %d from %s to %s", id, cur, to)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE ideas SET moderation_state = $2, updated_at = now() WHERE id = $1`, id, to); err != nil {
 				return err
@@ -374,7 +385,7 @@ type MergeResult struct {
 //   - source becomes moderation_state=merged, merged_into_id=target.
 func (s *Store) Merge(ctx context.Context, sourceID, targetID int64) (MergeResult, error) {
 	if sourceID == targetID {
-		return MergeResult{}, conflict("cannot merge an idea into itself")
+		return MergeResult{}, conflict(ConflictSelfMerge, "cannot merge an idea into itself")
 	}
 	var res MergeResult
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -406,10 +417,10 @@ func (s *Store) Merge(ctx context.Context, sourceID, targetID int64) (MergeResul
 			return ErrNotFound
 		}
 		if src.mod == ModMerged {
-			return conflict("idea %d is already merged", sourceID)
+			return conflict(ConflictAlreadyMerged, "idea %d is already merged", sourceID)
 		}
 		if tgt.mod != ModApproved && tgt.mod != ModPending {
-			return conflict("merge target %d is %s; it must be approved or pending", targetID, tgt.mod)
+			return conflict(ConflictBadTarget, "merge target %d is %s; it must be approved or pending", targetID, tgt.mod)
 		}
 
 		tag, err := tx.Exec(ctx, `INSERT INTO votes (idea_id, voter_sub, value, created_at, updated_at)
@@ -466,16 +477,68 @@ func (s *Store) Edit(ctx context.Context, id int64, title, body *string) (Idea, 
 	return s.GetIdea(ctx, id)
 }
 
-// Delete removes an idea; its votes and ideas merged into it cascade.
-func (s *Store) Delete(ctx context.Context, id int64) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM ideas WHERE id = $1`, id)
-	if err != nil {
+// HasMergedError is returned by Delete when other ideas are merged into the
+// idea and the caller did not ask for them to be deleted too.
+type HasMergedError struct {
+	ID     int64
+	Merged int
+}
+
+func (e *HasMergedError) Error() string {
+	return fmt.Sprintf("idea %d has %d merged idea(s)", e.ID, e.Merged)
+}
+
+// Delete removes an idea and its votes. If other ideas are merged into it,
+// Delete refuses with *HasMergedError unless withMerged is true, in which case
+// the merged ideas (and their votes) are deleted in the same transaction.
+// The schema backs this up: merged_into_id has no ON DELETE CASCADE (0002).
+func (s *Store) Delete(ctx context.Context, id int64, withMerged bool) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// Locking the target blocks a concurrent Merge into it (Merge locks
+		// both rows FOR UPDATE), so the count below cannot go stale.
+		var one int
+		err := tx.QueryRow(ctx, `SELECT 1 FROM ideas WHERE id = $1 FOR UPDATE`, id).Scan(&one)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM ideas WHERE merged_into_id = $1`, id).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			if !withMerged {
+				return &HasMergedError{ID: id, Merged: n}
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM ideas WHERE merged_into_id = $1`, id); err != nil {
+				return err
+			}
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM ideas WHERE id = $1`, id)
 		return err
+	})
+}
+
+// MergedCounts returns, per merge target, how many ideas are merged into it.
+func (s *Store) MergedCounts(ctx context.Context) (map[int64]int, error) {
+	rows, err := s.pool.Query(ctx, `SELECT merged_into_id, count(*) FROM ideas
+		WHERE merged_into_id IS NOT NULL GROUP BY merged_into_id`)
+	if err != nil {
+		return nil, err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var id int64
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
 	}
-	return nil
+	return out, rows.Err()
 }
 
 // DeleteUserData implements GDPR erasure for sub: all their votes are deleted

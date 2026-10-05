@@ -4,6 +4,9 @@
 //	FV_HOST_SECRET=... FV_HOST_ISSUER=okokumo fvtoken -sub user-1 -voter
 //	FV_HOST_SECRET=... FV_HOST_ISSUER=okokumo fvtoken -verify <jwt>
 //
+// When FV_AUDIENCE is set, minted tokens carry it as aud and -verify
+// requires it, exactly like the service.
+//
 // A negative -ttl mints an already-expired token (useful for testing).
 package main
 
@@ -12,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/slash4/featurevote/internal/hosttoken"
@@ -26,12 +30,13 @@ func main() {
 	flag.Parse()
 
 	secret, issuer := os.Getenv("FV_HOST_SECRET"), os.Getenv("FV_HOST_ISSUER")
+	audience := strings.TrimSpace(os.Getenv("FV_AUDIENCE"))
 	if secret == "" || issuer == "" {
 		fail("FV_HOST_SECRET and FV_HOST_ISSUER must be set")
 	}
 
 	if *verify != "" {
-		v := hosttoken.Verifier{Secret: []byte(secret), Issuer: issuer, Skew: *skew}
+		v := hosttoken.Verifier{Secret: []byte(secret), Issuer: issuer, Audience: audience, Skew: *skew}
 		c, err := v.Verify(*verify)
 		if err != nil {
 			fail("verify: " + err.Error())
@@ -47,7 +52,11 @@ func main() {
 	if *ttl > hosttoken.MaxLifetime {
 		fmt.Fprintf(os.Stderr, "fvtoken: warning: ttl %s exceeds %s; the service will reject this token\n", *ttl, hosttoken.MaxLifetime)
 	}
-	fmt.Println(hosttoken.Mint(secret, issuer, *sub, *voter, *ttl))
+	now := time.Now()
+	fmt.Println(hosttoken.Encode(secret, hosttoken.Claims{
+		Issuer: issuer, Subject: *sub, Audience: audience, Voter: *voter,
+		IssuedAt: now, ExpiresAt: now.Add(*ttl),
+	}))
 }
 
 func fail(msg string) {

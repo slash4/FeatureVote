@@ -39,6 +39,7 @@ type Server struct {
 	now        func() time.Time
 	verifier   *hosttoken.Verifier
 	voteLimit  *slidingWindow
+	loginLimit *slidingWindow
 	origins    map[string]bool
 	widget     []byte
 	widgetETag string
@@ -60,12 +61,14 @@ func NewServer(opts Options) *Server {
 		s.now = time.Now
 	}
 	s.verifier = &hosttoken.Verifier{
-		Secret: []byte(s.cfg.HostSecret),
-		Issuer: s.cfg.HostIssuer,
-		Skew:   s.cfg.ClockSkew,
-		Now:    s.now,
+		Secret:   []byte(s.cfg.HostSecret),
+		Issuer:   s.cfg.HostIssuer,
+		Audience: s.cfg.Audience,
+		Skew:     s.cfg.ClockSkew,
+		Now:      s.now,
 	}
 	s.voteLimit = newSlidingWindow(s.cfg.VoteLimitPerMinute, time.Minute)
+	s.loginLimit = newSlidingWindow(adminLoginPerMinute, time.Minute)
 	s.origins = make(map[string]bool, len(s.cfg.AllowedOrigins))
 	for _, o := range s.cfg.AllowedOrigins {
 		s.origins[o] = true
