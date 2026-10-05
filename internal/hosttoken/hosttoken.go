@@ -15,6 +15,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // MaxLifetime is the longest token lifetime the service accepts, checked
@@ -23,6 +24,22 @@ const MaxLifetime = 15 * time.Minute
 
 // maxSubLen bounds the opaque subject identifier.
 const maxSubLen = 255
+
+// ValidSubject reports whether sub is a usable subject: 1 to 255 bytes of
+// valid UTF-8 with no C0 control characters (NUL in particular, which
+// Postgres text columns reject). Verify enforces it on tokens; the admin
+// GDPR endpoint uses it to reject subs no valid token could carry.
+func ValidSubject(sub string) bool {
+	if sub == "" || len(sub) > maxSubLen || !utf8.ValidString(sub) {
+		return false
+	}
+	for i := 0; i < len(sub); i++ {
+		if sub[i] < 0x20 {
+			return false
+		}
+	}
+	return true
+}
 
 // maxTokenLen bounds the raw token size before any decoding work.
 const maxTokenLen = 4096
@@ -127,7 +144,7 @@ func (v *Verifier) Verify(token string) (Claims, error) {
 	}
 	c.Issuer = iss
 	sub, ok := payload["sub"].(string)
-	if !ok || sub == "" || len(sub) > maxSubLen {
+	if !ok || !ValidSubject(sub) {
 		return Claims{}, ErrInvalid
 	}
 	c.Subject = sub

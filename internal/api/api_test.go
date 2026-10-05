@@ -471,6 +471,8 @@ func TestTokenValidation(t *testing.T) {
 		{"missing sub", hosttoken.Sign(hostSecret, hs, []byte(`{"iss":"okokumo","voter":true,"exp":`+exp+`}`)), "invalid_token"},
 		{"missing iat", hosttoken.Sign(hostSecret, hs, []byte(`{"iss":"okokumo","sub":"bob","voter":true,"exp":`+exp+`}`)), "invalid_token"},
 		{"exp - iat > 15m", hosttoken.MintAt(now.Add(-5*time.Minute), hostSecret, hostIssuer, "bob", true, 16*time.Minute), "invalid_token"},
+		{"NUL in sub", hosttoken.MintAt(now, hostSecret, hostIssuer, "bob\x00x", true, time.Minute), "invalid_token"},
+		{"newline in sub", hosttoken.MintAt(now, hostSecret, hostIssuer, "bob\nx", true, time.Minute), "invalid_token"},
 		{"garbage", "garbage", "invalid_token"},
 	}
 	for _, tc := range cases {
@@ -781,6 +783,7 @@ func TestCORS(t *testing.T) {
 func TestAdminAuth(t *testing.T) {
 	e := newEnv(t)
 	for _, tok := range []string{"", "wrong", hostSecret, adminToken + "x"} {
+		e.clock.Advance(61 * time.Second) // 3 failures per round: stay under the throttle
 		e.mustErr(e.do("GET", "/v1/admin/ideas", tok, nil), 401, "unauthorized")
 		e.mustErr(e.do("POST", "/v1/admin/ideas/1/approve", tok, nil), 401, "unauthorized")
 		e.mustErr(e.do("DELETE", "/v1/admin/users/bob", tok, nil), 401, "unauthorized")
@@ -851,6 +854,12 @@ func TestGDPRDelete(t *testing.T) {
 	if len(me["votes"].([]any)) != 0 || len(me["ideas"].([]any)) != 0 {
 		t.Fatalf("dave /v1/me = %v", me)
 	}
+	// Subs that cannot exist in a valid token are input errors, not 500s
+	// (Postgres rejects NUL and invalid UTF-8 in text).
+	for _, bad := range []string{"a%00b", "a%0Ab", "a%FFb", strings.Repeat("s", 256)} {
+		e.mustErr(e.do("DELETE", "/v1/admin/users/"+bad, adminToken, nil), 400, "invalid_input")
+	}
+	e.must(e.do("DELETE", "/v1/admin/users/"+strings.Repeat("s", 255), adminToken, nil), 200)
 }
 
 func TestSizeLimits(t *testing.T) {
@@ -1077,6 +1086,13 @@ func TestAdminHTMLLoginAndEscaping(t *testing.T) {
 	if _, body = getPage(t, c, e.srv.URL+res.Header.Get("Location")); !strings.Contains(body, "User data deleted: 0 votes deleted, 1 idea anonymised.") {
 		t.Fatal("gdpr flash not rendered")
 	}
+	res, _ = postForm(t, c, e.srv.URL+"/admin/users/delete", url.Values{"csrf": {csrf}, "sub": {"a\x00b"}})
+	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != "/admin?m=err_sub_invalid" {
+		t.Fatalf("gdpr form NUL sub = %d %s", res.StatusCode, res.Header.Get("Location"))
+	}
+	if _, body = getPage(t, c, e.srv.URL+res.Header.Get("Location")); !strings.Contains(body, "Error: sub must be at most 255 bytes") {
+		t.Fatal("gdpr invalid-sub flash not rendered")
+	}
 
 	// Logout clears the session.
 	postForm(t, c, e.srv.URL+"/admin/logout", url.Values{"csrf": {csrf}})
@@ -1168,6 +1184,90 @@ func TestAdminLoginThrottle(t *testing.T) {
 		if res := login(e, adminToken, "X-Forwarded-For", "198.51.100.8"); res.StatusCode != http.StatusSeeOther {
 			t.Fatalf("other client = %d, want 303", res.StatusCode)
 		}
+	})
+
+	t.Run("IPv6 clients share their /64", func(t *testing.T) {
+		e := newEnv(t, func(c *config.Config) { c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")} })
+		for i := 1; i <= 5; i++ {
+			login(e, "wrong", "X-Forwarded-For", fmt.Sprintf("2001:db8:1:2::%x", i))
+		}
+		// Rotating the interface ID inside the /64 does not escape the bucket.
+		if res := login(e, adminToken, "X-Forwarded-For", "2001:db8:1:2:dead:beef:0:1"); res.StatusCode != 429 {
+			t.Fatalf("same /64 = %d, want 429", res.StatusCode)
+		}
+		if res := login(e, adminToken, "X-Forwarded-For", "2001:db8:1:3::1"); res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("next /64 = %d, want 303", res.StatusCode)
+		}
+	})
+}
+
+// Failed bearer attempts on /v1/admin/* share the /admin/login bucket (5 per
+// minute per IP); successful requests are not counted.
+func TestAdminAPIThrottle(t *testing.T) {
+	t.Run("failures only", func(t *testing.T) {
+		e := newEnv(t)
+		for i := 0; i < 20; i++ { // successes never fill the bucket
+			e.must(e.do("GET", "/v1/admin/ideas", adminToken, nil), 200)
+		}
+		for i := 0; i < 5; i++ {
+			e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil), 401, "unauthorized")
+		}
+		r := e.do("GET", "/v1/admin/ideas", "wrong", nil)
+		e.mustErr(r, 429, "rate_limited")
+		if ra, _ := strconv.Atoi(r.header.Get("Retry-After")); ra < 1 || ra > 60 {
+			t.Fatalf("Retry-After = %q", r.header.Get("Retry-After"))
+		}
+		// Throttled means throttled: the right token must not reveal itself
+		// with a 200 while the bucket is full.
+		e.mustErr(e.do("DELETE", "/v1/admin/users/bob", adminToken, nil), 429, "rate_limited")
+		e.mustErr(e.do("GET", "/v1/admin/ideas", "", nil), 429, "rate_limited")
+		e.clock.Advance(61 * time.Second)
+		e.must(e.do("GET", "/v1/admin/ideas", adminToken, nil), 200)
+	})
+
+	t.Run("shared with /admin/login", func(t *testing.T) {
+		e := newEnv(t)
+		for i := 0; i < 3; i++ {
+			res, _ := postForm(t, adminClient(t), e.srv.URL+"/admin/login", url.Values{"token": {"wrong"}})
+			if res.StatusCode != 401 {
+				t.Fatalf("login %d = %d, want 401", i+1, res.StatusCode)
+			}
+		}
+		e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil), 401, "unauthorized")
+		e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil), 401, "unauthorized")
+		e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil), 429, "rate_limited")
+		res, _ := postForm(t, adminClient(t), e.srv.URL+"/admin/login", url.Values{"token": {adminToken}})
+		if res.StatusCode != 429 {
+			t.Fatalf("login after API failures = %d, want 429", res.StatusCode)
+		}
+	})
+
+	// An attacker holding more /64s than the limiter tracks (10k; one /48 is
+	// 65,536) must not lock admins out: a full table evicts its least
+	// recently used key, so a newcomer still gets its own 5-per-minute bucket.
+	t.Run("full key table does not lock admins out", func(t *testing.T) {
+		e := newEnv(t, func(c *config.Config) { c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")} })
+		v6 := func(n, host int) string { return fmt.Sprintf("2001:db8:%x:%x::%x", n>>16, n&0xffff, host) }
+		const flood = 10000 + 50 // more distinct /64s than limiterMaxKeys
+		for i := 0; i < flood; i++ {
+			if r := e.do("GET", "/v1/admin/ideas", "wrong", nil, "X-Forwarded-For", v6(i, 1)); r.status != 401 {
+				t.Fatalf("flood request %d = %d, want 401", i+1, r.status)
+			}
+		}
+		admin := v6(1<<20, 1) // a /64 the flood never used
+		e.must(e.do("GET", "/v1/admin/ideas", adminToken, nil, "X-Forwarded-For", admin), 200)
+		res, _ := postForm(t, adminClient(t), e.srv.URL+"/admin/login", url.Values{"token": {adminToken}}, "X-Forwarded-For", v6(1<<20+1, 1))
+		if res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("admin login while table full = %d, want 303", res.StatusCode)
+		}
+		// Throttling is still per key: a newcomer guessing gets 5 tries, then 429.
+		guesser := v6(1<<20+2, 1)
+		for i := 0; i < 5; i++ {
+			e.mustErr(e.do("GET", "/v1/admin/ideas", "wrong", nil, "X-Forwarded-For", guesser), 401, "unauthorized")
+		}
+		e.mustErr(e.do("GET", "/v1/admin/ideas", adminToken, nil, "X-Forwarded-For", guesser), 429, "rate_limited")
+		// ...and the admin, whose successes left no entry, is unaffected.
+		e.must(e.do("GET", "/v1/admin/ideas", adminToken, nil, "X-Forwarded-For", admin), 200)
 	})
 }
 

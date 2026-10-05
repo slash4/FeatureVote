@@ -60,7 +60,7 @@ Claims:
 | Claim   | Type          | Required | Constraint | What FeatureVote does with it |
 |---------|---------------|----------|------------|-------------------------------|
 | `iss`   | string        | yes      | must equal the instance's `FV_HOST_ISSUER` (e.g. `"okokumo"`, `"doloop"`) | rejects tokens from another product |
-| `sub`   | string        | yes      | non-empty, ≤ 255 bytes, **opaque stable user id** — never an email or a name | the only identity stored (`votes.voter_sub`, `ideas.author_sub`) |
+| `sub`   | string        | yes      | non-empty, ≤ 255 bytes, no control characters, **opaque stable user id** — never an email or a name | the only identity stored (`votes.voter_sub`, `ideas.author_sub`) |
 | `voter` | JSON boolean  | yes*     | the **host's eligibility decision** (e.g. paid plan) | `true`: may vote and submit. `false`/missing/non-boolean: read-only (`403 not_eligible` on writes) |
 | `aud`   | string or array of strings | only when `FV_AUDIENCE` is set | must contain the instance's `FV_AUDIENCE` (e.g. `"feedback.okokumo.com"`) | stops a token minted for one instance being replayed against another that shares the secret |
 | `iat`   | number (unix seconds) | **yes** | not in the future (beyond skew); `exp − iat ≤ 15 min` | bounds the minted lifetime |
@@ -379,12 +379,24 @@ Environment only; the service refuses to start with a clear message on any inval
 | `FV_ALLOWED_ORIGINS` | empty | comma-separated exact origins allowed to call `/v1/*` from browsers |
 | `FV_LISTEN_ADDR` | `:8080` | |
 | `FV_SUBMIT_LIMIT_PER_DAY` | `5` | ideas per user per trailing 24 h (counted in the database) |
-| `FV_VOTE_LIMIT_PER_MINUTE` | `30` | vote PUT+DELETE per user per minute (in-memory, per process) |
+| `FV_VOTE_LIMIT_PER_MINUTE` | `30` | vote PUT+DELETE per user per minute (in-memory, per process; tracks up to 10,000 voters a minute, beyond that new voters get `429` until the oldest age out) |
 | `FV_CLOCK_SKEW` | `30s` | Go duration, max `2m` |
 | `FV_COOKIE_SECURE` | `true` | set `false` only for plain-HTTP local dev (admin page cookie) |
-| `FV_TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed when deriving the client IP (admin login throttle: 5 attempts/min/IP). Default fits a reverse proxy on the same host (Caddy); `none` trusts no proxy |
+| `FV_TRUSTED_PROXIES` | `127.0.0.0/8,::1/128` | comma-separated IPs/CIDRs whose `X-Forwarded-For` is believed when deriving the client IP (admin throttle: 5 `/admin/login` attempts plus failed `/v1/admin/*` token attempts per minute per IP; IPv6 clients are bucketed by /64). Default fits a reverse proxy on the same host (Caddy); `none` trusts no proxy |
 
 Generate secrets with `openssl rand -hex 32`.
+
+**`FV_TRUSTED_PROXIES` behind anything other than a same-host proxy.** FeatureVote only believes
+`X-Forwarded-For` from the addresses listed here. If a proxy in a container (Docker bridge,
+e.g. `172.17.0.0/16`), a load balancer or a CDN sits in front of FeatureVote, add its addresses or
+ranges, every hop up to the internet-facing one. For a CDN, use its published egress ranges. If you
+don't, FeatureVote sees the proxy as the client, so every visitor lands in one throttle bucket: five
+wrong admin tokens from anyone lock everyone out of `/admin` and `/v1/admin/*` for a minute. Only
+list proxies you control or trust. A listed address can claim to be any client. The same applies when
+FeatureVote itself runs in Docker and the host proxy reaches it through a published port: the peer is
+then usually the bridge gateway (e.g. `172.17.0.1`), not loopback. To check, make one failed admin
+login and look at the `ip` in the `admin login failed` log line. It should be your public address,
+not a proxy's.
 
 ## 8. CORS and CSP
 
@@ -414,6 +426,18 @@ host token endpoint is same-origin, so it is covered by `connect-src 'self'`.
 ## 9. Administration
 
 All admin calls use `Authorization: Bearer $FV_ADMIN_TOKEN`. Missing/wrong token → `401 unauthorized`.
+Failed token attempts share the `/admin/login` bucket (5 per minute per client IP); once it is full,
+every admin call from that IP gets `429 rate_limited` with `Retry-After`, even with the right token.
+Successful calls are not counted, so scripts can make as many as they need.
+
+The throttle tracks up to 10,000 client keys (an IPv4 address or an IPv6 /64) in memory. If more are
+active within a minute, for example an attacker spreading guesses over a whole IPv6 /48, the least
+recently used key is dropped, so a new client always gets its own five attempts. This keeps admins
+from being locked out by a flood of addresses. The trade-off: an attacker with more than 10,000
+addresses can reset its own buckets, so guessing is then bounded only by request rate. That is why
+`FV_ADMIN_TOKEN` must be at least 32 bytes: generate it with `openssl rand -hex 32` and the throttle
+stays defence in depth. A `rate limiter full; evicting least recently used clients` warning in the
+log means such a flood is happening.
 
 ```sh
 FV=https://feedback.okokumo.com
@@ -522,5 +546,5 @@ Errors: `{"error":{"code":"<code>","message":"<english developer message>"}}`. M
 | 409 | `voting_closed` | idea is `shipped` or `declined` (cast and remove) |
 | 409 | `has_merged_ideas` | admin delete of an idea other ideas are merged into, without `?cascade=true` |
 | 413 | `payload_too_large` | body > 16 KiB |
-| 429 | `rate_limited` | submit or vote limit; honour `Retry-After` (seconds) |
+| 429 | `rate_limited` | submit or vote limit, or 5 failed admin token attempts in a minute from one IP; honour `Retry-After` (seconds) |
 | 500 | `internal` | server error |

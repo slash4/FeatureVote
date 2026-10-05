@@ -67,8 +67,12 @@ func NewServer(opts Options) *Server {
 		Skew:     s.cfg.ClockSkew,
 		Now:      s.now,
 	}
-	s.voteLimit = newSlidingWindow(s.cfg.VoteLimitPerMinute, time.Minute)
-	s.loginLimit = newSlidingWindow(adminLoginPerMinute, time.Minute)
+	s.voteLimit = newSlidingWindow("vote", s.cfg.VoteLimitPerMinute, time.Minute, limiterMaxKeys, refuseNew, s.log)
+	// The admin throttle evicts instead of refusing new keys. Refusing would
+	// let a flood from ~10k IPv6 /64s (one /48) answer 429 to every admin,
+	// right token included. FV_ADMIN_TOKEN is at least 32 bytes, so the
+	// throttle is defence in depth against guessing; admin access wins.
+	s.loginLimit = newSlidingWindow("admin", adminLoginPerMinute, time.Minute, limiterMaxKeys, evictOldest, s.log)
 	s.origins = make(map[string]bool, len(s.cfg.AllowedOrigins))
 	for _, o := range s.cfg.AllowedOrigins {
 		s.origins[o] = true

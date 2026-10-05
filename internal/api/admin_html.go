@@ -13,13 +13,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/slash4/featurevote/internal/hosttoken"
 	"github.com/slash4/featurevote/internal/store"
 )
 
 const (
 	adminCookie     = "fv_admin"
 	adminSessionTTL = 12 * time.Hour
-	// adminLoginPerMinute caps /admin/login attempts per client IP.
+	// adminLoginPerMinute caps /admin/login attempts and failed /v1/admin/*
+	// bearer attempts (one shared bucket) per client IP.
 	adminLoginPerMinute = 5
 )
 
@@ -231,7 +233,7 @@ func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 	// Throttle before looking at the token: every attempt counts, so a
 	// guesser gets 5 tries per minute per IP whatever the outcome.
 	ip := s.clientIP(r)
-	if ok, retry := s.loginLimit.allow(ip, s.now()); !ok {
+	if ok, retry := s.loginLimit.allow(throttleKey(ip), s.now()); !ok {
 		s.log.Warn("admin login throttled", "ip", ip)
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		s.renderAdmin(w, http.StatusTooManyRequests, adminView{Error: "Too many login attempts. Wait a minute and try again."})
@@ -344,6 +346,9 @@ func (s *Server) adminFormDeleteUser(w http.ResponseWriter, r *http.Request) fla
 	sub := strings.TrimSpace(r.PostForm.Get("sub"))
 	if sub == "" {
 		return flash{code: flErrSubMissing}
+	}
+	if !hosttoken.ValidSubject(sub) {
+		return flash{code: flErrSubInvalid}
 	}
 	votes, ideas, err := s.store.DeleteUserData(r.Context(), sub)
 	return s.result(r, err, flash{code: flUserDeleted, n: votes, k: ideas})
