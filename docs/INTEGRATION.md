@@ -386,6 +386,18 @@ Environment only; the service refuses to start with a clear message on any inval
 
 Generate secrets with `openssl rand -hex 32`.
 
+**`FV_TRUSTED_PROXIES` behind anything other than a same-host proxy.** FeatureVote only believes
+`X-Forwarded-For` from the addresses listed here. If a proxy in a container (Docker bridge,
+e.g. `172.17.0.0/16`), a load balancer or a CDN sits in front of FeatureVote, add its addresses or
+ranges, every hop up to the internet-facing one. For a CDN, use its published egress ranges. If you
+don't, FeatureVote sees the proxy as the client, so every visitor lands in one throttle bucket: five
+wrong admin tokens from anyone lock everyone out of `/admin` and `/v1/admin/*` for a minute. Only
+list proxies you control or trust. A listed address can claim to be any client. The same applies when
+FeatureVote itself runs in Docker and the host proxy reaches it through a published port: the peer is
+then usually the bridge gateway (e.g. `172.17.0.1`), not loopback. To check, make one failed admin
+login and look at the `ip` in the `admin login failed` log line. It should be your public address,
+not a proxy's.
+
 ## 8. CORS and CSP
 
 **CORS.** Add every origin that embeds the widget to `FV_ALLOWED_ORIGINS` — typically both the app and
