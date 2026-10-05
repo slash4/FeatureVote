@@ -36,6 +36,7 @@ const (
 	flErrBadID      = "err_bad_id"
 	flErrBadStatus  = "err_bad_status"
 	flErrSubMissing = "err_sub_missing"
+	flErrSubInvalid = "err_sub_invalid"
 	flErrTitle      = "err_title"
 	flErrBody       = "err_body"
 	flErrHasMerged  = "err_has_merged"
@@ -52,7 +53,7 @@ var flashNeeds = map[string]needs{
 	flCreated: {id: true}, flApproved: {id: true}, flRejected: {id: true},
 	flMerged: {id: true, into: true, n: true, k: true}, flStatus: {id: true, status: true},
 	flSaved: {id: true}, flDeleted: {id: true}, flUserDeleted: {n: true, k: true},
-	flErrNotFound: {}, flErrInternal: {}, flErrBadID: {}, flErrBadStatus: {}, flErrSubMissing: {},
+	flErrNotFound: {}, flErrInternal: {}, flErrBadID: {}, flErrBadStatus: {}, flErrSubMissing: {}, flErrSubInvalid: {},
 	flErrTitle: {}, flErrBody: {}, flErrHasMerged: {id: true, n: true},
 	flErrTransition: {id: true}, flErrSelfMerge: {}, flErrMerged: {id: true}, flErrBadTarget: {into: true},
 }
@@ -143,6 +144,8 @@ func (f flash) text() (string, bool) {
 		return "Error: unknown status.", true
 	case flErrSubMissing:
 		return "Error: sub is required.", true
+	case flErrSubInvalid:
+		return "Error: sub must be at most 255 bytes, without control characters.", true
 	case flErrTitle:
 		return "Error: the title must be 1 to 120 characters, without control characters.", true
 	case flErrBody:

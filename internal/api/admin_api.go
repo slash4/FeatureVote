@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/slash4/featurevote/internal/hosttoken"
 	"github.com/slash4/featurevote/internal/store"
 )
 
@@ -229,6 +230,10 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 	sub := r.PathValue("sub")
 	if sub == "" {
 		writeError(w, http.StatusBadRequest, codeInvalidInput, "sub is required")
+		return
+	}
+	if !hosttoken.ValidSubject(sub) {
+		writeError(w, http.StatusBadRequest, codeInvalidInput, "sub must be at most 255 bytes of UTF-8 without control characters")
 		return
 	}
 	votes, ideas, err := s.store.DeleteUserData(r.Context(), sub)

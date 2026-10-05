@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/slash4/featurevote/internal/hosttoken"
 	"github.com/slash4/featurevote/internal/store"
 )
 
@@ -345,6 +346,9 @@ func (s *Server) adminFormDeleteUser(w http.ResponseWriter, r *http.Request) fla
 	sub := strings.TrimSpace(r.PostForm.Get("sub"))
 	if sub == "" {
 		return flash{code: flErrSubMissing}
+	}
+	if !hosttoken.ValidSubject(sub) {
+		return flash{code: flErrSubInvalid}
 	}
 	votes, ideas, err := s.store.DeleteUserData(r.Context(), sub)
 	return s.result(r, err, flash{code: flUserDeleted, n: votes, k: ideas})

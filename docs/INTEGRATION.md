@@ -60,7 +60,7 @@ Claims:
 | Claim   | Type          | Required | Constraint | What FeatureVote does with it |
 |---------|---------------|----------|------------|-------------------------------|
 | `iss`   | string        | yes      | must equal the instance's `FV_HOST_ISSUER` (e.g. `"okokumo"`, `"doloop"`) | rejects tokens from another product |
-| `sub`   | string        | yes      | non-empty, ≤ 255 bytes, **opaque stable user id** — never an email or a name | the only identity stored (`votes.voter_sub`, `ideas.author_sub`) |
+| `sub`   | string        | yes      | non-empty, ≤ 255 bytes, no control characters, **opaque stable user id** — never an email or a name | the only identity stored (`votes.voter_sub`, `ideas.author_sub`) |
 | `voter` | JSON boolean  | yes*     | the **host's eligibility decision** (e.g. paid plan) | `true`: may vote and submit. `false`/missing/non-boolean: read-only (`403 not_eligible` on writes) |
 | `aud`   | string or array of strings | only when `FV_AUDIENCE` is set | must contain the instance's `FV_AUDIENCE` (e.g. `"feedback.okokumo.com"`) | stops a token minted for one instance being replayed against another that shares the secret |
 | `iat`   | number (unix seconds) | **yes** | not in the future (beyond skew); `exp − iat ≤ 15 min` | bounds the minted lifetime |

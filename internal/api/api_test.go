@@ -471,6 +471,8 @@ func TestTokenValidation(t *testing.T) {
 		{"missing sub", hosttoken.Sign(hostSecret, hs, []byte(`{"iss":"okokumo","voter":true,"exp":`+exp+`}`)), "invalid_token"},
 		{"missing iat", hosttoken.Sign(hostSecret, hs, []byte(`{"iss":"okokumo","sub":"bob","voter":true,"exp":`+exp+`}`)), "invalid_token"},
 		{"exp - iat > 15m", hosttoken.MintAt(now.Add(-5*time.Minute), hostSecret, hostIssuer, "bob", true, 16*time.Minute), "invalid_token"},
+		{"NUL in sub", hosttoken.MintAt(now, hostSecret, hostIssuer, "bob\x00x", true, time.Minute), "invalid_token"},
+		{"newline in sub", hosttoken.MintAt(now, hostSecret, hostIssuer, "bob\nx", true, time.Minute), "invalid_token"},
 		{"garbage", "garbage", "invalid_token"},
 	}
 	for _, tc := range cases {
@@ -852,6 +854,12 @@ func TestGDPRDelete(t *testing.T) {
 	if len(me["votes"].([]any)) != 0 || len(me["ideas"].([]any)) != 0 {
 		t.Fatalf("dave /v1/me = %v", me)
 	}
+	// Subs that cannot exist in a valid token are input errors, not 500s
+	// (Postgres rejects NUL and invalid UTF-8 in text).
+	for _, bad := range []string{"a%00b", "a%0Ab", "a%FFb", strings.Repeat("s", 256)} {
+		e.mustErr(e.do("DELETE", "/v1/admin/users/"+bad, adminToken, nil), 400, "invalid_input")
+	}
+	e.must(e.do("DELETE", "/v1/admin/users/"+strings.Repeat("s", 255), adminToken, nil), 200)
 }
 
 func TestSizeLimits(t *testing.T) {
@@ -1077,6 +1085,13 @@ func TestAdminHTMLLoginAndEscaping(t *testing.T) {
 	}
 	if _, body = getPage(t, c, e.srv.URL+res.Header.Get("Location")); !strings.Contains(body, "User data deleted: 0 votes deleted, 1 idea anonymised.") {
 		t.Fatal("gdpr flash not rendered")
+	}
+	res, _ = postForm(t, c, e.srv.URL+"/admin/users/delete", url.Values{"csrf": {csrf}, "sub": {"a\x00b"}})
+	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != "/admin?m=err_sub_invalid" {
+		t.Fatalf("gdpr form NUL sub = %d %s", res.StatusCode, res.Header.Get("Location"))
+	}
+	if _, body = getPage(t, c, e.srv.URL+res.Header.Get("Location")); !strings.Contains(body, "Error: sub must be at most 255 bytes") {
+		t.Fatal("gdpr invalid-sub flash not rendered")
 	}
 
 	// Logout clears the session.
