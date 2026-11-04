@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily FeatureVote moderation-queue watchdog (07:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 UTC
+Persistent=true
+RandomizedDelaySec=0
+Unit=featurevote-moderation-check.service
+
+[Install]
+WantedBy=timers.target

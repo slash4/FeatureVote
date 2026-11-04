@@ -18,7 +18,8 @@ COPY --from=widget /src/internal/web/static/widget.js internal/web/static/widget
 ENV CGO_ENABLED=0
 RUN go build -trimpath -ldflags="-s -w" -o /out/featurevote ./cmd/featurevote \
  && go build -trimpath -ldflags="-s -w" -o /out/demohost ./cmd/demohost \
- && go build -trimpath -ldflags="-s -w" -o /out/fvtoken ./cmd/fvtoken
+ && go build -trimpath -ldflags="-s -w" -o /out/fvtoken ./cmd/fvtoken \
+ && go build -trimpath -ldflags="-s -w" -o /out/fvpending ./cmd/fvpending
 
 # Demo host (local development only; see cmd/demohost). Build with --target demohost.
 FROM gcr.io/distroless/static:nonroot AS demohost
@@ -33,6 +34,7 @@ ENTRYPOINT ["/demohost", "-dir", "/examples"]
 FROM gcr.io/distroless/static:nonroot AS runtime
 COPY --from=build /out/featurevote /featurevote
 COPY --from=build /out/fvtoken /fvtoken
+COPY --from=build /out/fvpending /fvpending
 EXPOSE 8080
 USER nonroot:nonroot
 ENTRYPOINT ["/featurevote"]
