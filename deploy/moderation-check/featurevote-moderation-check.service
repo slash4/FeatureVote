@@ -1,0 +1,45 @@
+# Daily FeatureVote moderation-queue watchdog (see README.md in this directory).
+# Exit 0 = nothing stale, 1 = stale suggestions found (already reported to the
+# check via /fail), 2 = the check could not run or the ping failed.
+[Unit]
+Description=FeatureVote moderation-queue watchdog
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=featurevote
+Group=featurevote
+EnvironmentFile=/etc/featurevote/env
+EnvironmentFile=/etc/featurevote/moderation-check.env
+# An unset FV_MODERATION_ADMIN_URL expands to an empty argument, which
+# fvpending treats as "no admin URL".
+ExecStart=/opt/featurevote/fvpending -older-than 48h -admin-url ${FV_MODERATION_ADMIN_URL}
+SuccessExitStatus=1
+TimeoutStartSec=2min
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+UMask=0077
+MemoryMax=64M

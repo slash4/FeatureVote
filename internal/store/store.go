@@ -559,3 +559,43 @@ func (s *Store) DeleteUserData(ctx context.Context, sub string) (votesDeleted, i
 	})
 	return votesDeleted, ideasAnonymised, err
 }
+
+// PendingIdea is a suggestion still waiting for moderation. Deliberately no title/body/author:
+// the watchdog's output goes to third-party alert channels.
+type PendingIdea struct {
+	ID        int64
+	CreatedAt time.Time
+	Age       time.Duration // computed by the DATABASE clock: now() - created_at
+}
+
+// PendingOlderThan returns ideas with moderation_state = 'pending' whose created_at is
+// strictly older than age according to the database clock, oldest first.
+func (s *Store) PendingOlderThan(ctx context.Context, age time.Duration) ([]PendingIdea, error) {
+	if age <= 0 {
+		return nil, fmt.Errorf("pending age must be > 0, got %s", age)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, created_at, EXTRACT(EPOCH FROM now() - created_at)::float8
+		FROM ideas WHERE moderation_state = 'pending' AND created_at < now() - make_interval(secs => $1)
+		ORDER BY created_at, id`, age.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	ideas, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (PendingIdea, error) {
+		var p PendingIdea
+		var secs float64
+		err := r.Scan(&p.ID, &p.CreatedAt, &secs)
+		p.Age = time.Duration(secs * float64(time.Second))
+		return p, err
+	})
+	if ideas == nil {
+		ideas = []PendingIdea{}
+	}
+	return ideas, err
+}
+
+// PendingCount returns how many ideas are pending moderation, of any age.
+func (s *Store) PendingCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM ideas WHERE moderation_state = 'pending'`).Scan(&n)
+	return n, err
+}

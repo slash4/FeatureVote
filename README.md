@@ -18,6 +18,7 @@ cmd/featurevote   service           cmd/fvtoken   mint/verify host tokens     cm
 internal/config   env config        internal/hosttoken  JWT verify/mint      internal/store  Postgres queries
 internal/migrate  migration runner  internal/api  HTTP handlers + admin page  internal/web   embedded widget.js
 migrations/       SQL migrations    widget/       TypeScript widget source    examples/      demo page
+cmd/fvpending     moderation-queue watchdog          deploy/moderation-check  its systemd units + install guide
 ```
 
 ## Run locally
@@ -80,6 +81,11 @@ as the vote write.
 - The vote rate limiter is in memory, per process — fine because each product runs one instance. The idea
   submission limit is counted in the database.
 - Logs are JSON (`log/slog`), one line per request; tokens and bodies are never logged.
+
+**Moderation watchdog.** `cmd/fvpending` reports suggestions pending moderation longer than 48h (ids and
+ages only) and pings an Okokumo cron check (`/fail` when anything is stale or the check cannot run). It runs
+daily from a systemd timer and needs only `FV_DATABASE_URL`; see
+[deploy/moderation-check/README.md](deploy/moderation-check/README.md).
 
 ## License
 
