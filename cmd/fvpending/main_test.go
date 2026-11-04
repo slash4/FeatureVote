@@ -41,11 +41,13 @@ func seed(t *testing.T, pool *pgxpool.Pool, state string, ago time.Duration, mer
 	return id
 }
 
-type seeded struct{ p49h, p47h, p10d int64 }
+type seeded struct{ p5d, p49h, p47h, p10d int64 }
 
 func seedMix(t *testing.T, pool *pgxpool.Pool) seeded {
 	t.Helper()
 	var s seeded
+	// p5d is inserted first so that neither id order matches created_at order.
+	s.p5d = seed(t, pool, store.ModPending, 5*24*time.Hour, nil)
 	s.p49h = seed(t, pool, store.ModPending, 49*time.Hour, nil)
 	s.p47h = seed(t, pool, store.ModPending, 47*time.Hour, nil)
 	approved := seed(t, pool, store.ModApproved, 30*24*time.Hour, nil)
@@ -67,18 +69,18 @@ func TestPendingOlderThan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].ID != s.p10d || got[1].ID != s.p49h {
-		t.Fatalf("got %+v, want ids [%d %d]", got, s.p10d, s.p49h)
+	if len(got) != 3 || got[0].ID != s.p10d || got[1].ID != s.p5d || got[2].ID != s.p49h {
+		t.Fatalf("got %+v, want ids [%d %d %d]", got, s.p10d, s.p5d, s.p49h)
 	}
-	if !near(got[0].Age, 10*24*time.Hour) || !near(got[1].Age, 49*time.Hour) {
-		t.Fatalf("ages %s, %s", got[0].Age, got[1].Age)
+	if !near(got[0].Age, 10*24*time.Hour) || !near(got[1].Age, 5*24*time.Hour) || !near(got[2].Age, 49*time.Hour) {
+		t.Fatalf("ages %s, %s, %s", got[0].Age, got[1].Age, got[2].Age)
 	}
-	if !near(time.Since(got[1].CreatedAt), 49*time.Hour) {
-		t.Fatalf("created_at %s", got[1].CreatedAt)
+	if !near(time.Since(got[2].CreatedAt), 49*time.Hour) {
+		t.Fatalf("created_at %s", got[2].CreatedAt)
 	}
 	n, err := store.New(pool).PendingCount(context.Background())
-	if err != nil || n != 3 {
-		t.Fatalf("PendingCount = %d, %v; want 3", n, err)
+	if err != nil || n != 4 {
+		t.Fatalf("PendingCount = %d, %v; want 4", n, err)
 	}
 	for _, age := range []time.Duration{0, -time.Hour} {
 		if _, err := store.New(pool).PendingOlderThan(context.Background(), age); err == nil {
@@ -166,7 +168,7 @@ func TestRunStale(t *testing.T) {
 	if r.ua != "fvpending" || r.ctype != "text/plain; charset=utf-8" {
 		t.Fatalf("headers: UA %q, Content-Type %q", r.ua, r.ctype)
 	}
-	for _, id := range []int64{s.p10d, s.p49h} {
+	for _, id := range []int64{s.p10d, s.p5d, s.p49h} {
 		if !strings.Contains(r.body, fmt.Sprintf("#%d ", id)) {
 			t.Fatalf("body lacks #%d:\n%s", id, r.body)
 		}
@@ -174,7 +176,7 @@ func TestRunStale(t *testing.T) {
 	if strings.Contains(r.body, fmt.Sprintf("#%d ", s.p47h)) {
 		t.Fatalf("body lists the 47h idea:\n%s", r.body)
 	}
-	if !strings.HasPrefix(r.body, "2 suggestions waiting for moderation longer than 48h:\n") ||
+	if !strings.HasPrefix(r.body, "3 suggestions waiting for moderation longer than 48h:\n") ||
 		!strings.Contains(r.body, "pending 10d 0h  (submitted ") ||
 		!strings.HasSuffix(r.body, "Moderate at https://feedback.example/admin\n") {
 		t.Fatalf("unexpected body:\n%s", r.body)
