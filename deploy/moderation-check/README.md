@@ -69,9 +69,14 @@ The binary only reads. Run it by hand as the service user with a tiny threshold,
 idea (exit 1 and a `/fail` ping if there is at least one; with an empty queue it reports OK):
 
 ```sh
-sudo -u featurevote bash -c 'set -a; . /etc/featurevote/env; . /etc/featurevote/moderation-check.env; \
-  /opt/featurevote/fvpending -older-than 1s -admin-url "$FV_MODERATION_ADMIN_URL"'; echo "exit $?"
+sudo systemd-run --quiet --wait --pipe --uid=featurevote --gid=featurevote \
+  -p EnvironmentFile=/etc/featurevote/env -p EnvironmentFile=/etc/featurevote/moderation-check.env \
+  /opt/featurevote/fvpending -older-than 1s; echo "exit $?"
 ```
+
+Use `systemd-run` (or the unit) rather than sourcing the env files in a shell: systemd's `EnvironmentFile`
+syntax is not shell syntax, and okokumo's `/etc/featurevote/env` has an unquoted `FV_ALLOWED_ORIGINS` list
+with spaces that `.`/`source` misparses.
 
 The check goes down and alerts; the next normal run (or `systemctl start featurevote-moderation-check.service`)
 recovers it if nothing is really stale. Leave `FV_MODERATION_PING_URL` out of the environment to try it
