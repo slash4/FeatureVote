@@ -354,6 +354,32 @@ func TestPingRetry(t *testing.T) {
 	}
 }
 
+// A 3xx from the ping endpoint must not be followed: following it would
+// re-send the /fail body (the report) to the Location host.
+func TestPingDoesNotFollowRedirects(t *testing.T) {
+	var elsewhere int
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhere++
+	}))
+	defer other.Close()
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Redirect(w, r, other.URL+"/steal", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	err := ping(context.Background(), newPingClient(), srv.URL+"/ping/abc123", true, "report", []time.Duration{0, 0})
+	if err == nil || !strings.Contains(err.Error(), "307") || strings.Contains(err.Error(), "abc123") {
+		t.Fatalf("a redirect must count as a failed ping, got err = %v", err)
+	}
+	if elsewhere != 0 {
+		t.Fatalf("redirect was followed: %d request(s) reached the Location host", elsewhere)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3 (redirect retried like any non-2xx)", calls)
+	}
+}
+
 func TestParsePingURL(t *testing.T) {
 	u, err := parsePingURL("https://app.okokumo.com/ping/tok/")
 	if err != nil || u.String() != "https://app.okokumo.com/ping/tok" {

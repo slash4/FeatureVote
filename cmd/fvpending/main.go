@@ -61,7 +61,7 @@ func run(ctx context.Context, args []string, env func(string) string, stdout, st
 		}
 		pingURL = u
 	}
-	client := &http.Client{}
+	client := newPingClient()
 	cantRun := func(err error) int {
 		msg := "fvpending: check could not run: " + err.Error()
 		fmt.Fprintln(stderr, msg)
@@ -284,6 +284,16 @@ func ping(ctx context.Context, client *http.Client, base string, fail bool, body
 		kind = "failure"
 	}
 	return fmt.Errorf("%s ping to %s failed after %d attempts: %s", kind, redact(base), attempts, scrub(last.Error(), base))
+}
+
+// newPingClient returns the client used for pings. It never follows
+// redirects: a 3xx would otherwise re-send the /fail body (the report) to
+// wherever the Location points. The 3xx is returned as-is, so pingOnce treats
+// it as a non-2xx failure.
+func newPingClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 func pingOnce(ctx context.Context, client *http.Client, target, body string) error {

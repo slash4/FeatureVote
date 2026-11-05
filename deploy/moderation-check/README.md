@@ -44,9 +44,11 @@ bodies or author ids. The ping URL is a secret: it is read only from the environ
    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o fvpending ./cmd/fvpending
    sudo install -o root -g root -m 0755 fvpending /opt/featurevote/fvpending
    ```
-3. Env file (`FV_DATABASE_URL` comes from the service's existing `/etc/featurevote/env`):
+3. Env file (`FV_DATABASE_URL` comes from the service's existing `/etc/featurevote/env`). Install it
+   `root:root 0600`: systemd reads `EnvironmentFile=` as root before dropping to `User=featurevote`, so the
+   service user never needs to read it, and a compromised service cannot rewrite the ping URL:
    ```sh
-   sudo install -o featurevote -g featurevote -m 0600 deploy/moderation-check/moderation-check.env.example \
+   sudo install -o root -g root -m 0600 deploy/moderation-check/moderation-check.env.example \
      /etc/featurevote/moderation-check.env
    sudoedit /etc/featurevote/moderation-check.env     # paste the real ping URL
    ```
