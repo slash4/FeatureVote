@@ -64,12 +64,18 @@ func setAdminHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 	h.Set("X-Frame-Options", "DENY")
-	h.Set("Referrer-Policy", "no-referrer")
+	// same-origin, NOT no-referrer: under no-referrer browsers send
+	// "Origin: null" on the page's own form POSTs, which adminHTML rightly
+	// rejects, so nobody could log in. same-origin still sends no referrer
+	// to other sites.
+	h.Set("Referrer-Policy", "same-origin")
 	h.Set("Cache-Control", "no-store")
 }
 
 // adminHTML adds security headers and rejects cross-origin POSTs: an Origin
-// header, when present, must match the request's own host.
+// header, when present, must match the request's own host. "Origin: null"
+// (opaque origin: sandboxed frames, data: URLs, privacy redirects) is
+// rejected too; it cannot be told apart from a cross-site forgery.
 func (s *Server) adminHTML(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setAdminHeaders(w)
