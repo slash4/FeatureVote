@@ -1050,7 +1050,7 @@ func TestAdminHTMLLoginAndEscaping(t *testing.T) {
 		t.Fatalf("anonymous page: %d", res.StatusCode)
 	}
 	if !strings.Contains(res.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
-		res.Header.Get("X-Frame-Options") != "DENY" || res.Header.Get("Referrer-Policy") != "no-referrer" {
+		res.Header.Get("X-Frame-Options") != "DENY" || res.Header.Get("Referrer-Policy") != "same-origin" {
 		t.Fatalf("security headers = %v", res.Header)
 	}
 	res, _ = postForm(t, c, e.srv.URL+"/admin/login", url.Values{"token": {"wrong"}})
@@ -1131,6 +1131,70 @@ func TestAdminHTMLCSRF(t *testing.T) {
 	res, _ = postForm(t, c, u, url.Values{"csrf": {csrf}}, "Origin", e.srv.URL)
 	if res.StatusCode != http.StatusSeeOther {
 		t.Fatalf("valid status = %d", res.StatusCode)
+	}
+}
+
+// browserFormOrigin is the Origin header a browser attaches to a form POST
+// from a page served with the given Referrer-Policy (Fetch spec, "append a
+// request Origin header", non-CORS POST): "no-referrer" always serialises
+// the origin as "null"; "same-origin" sends the real origin for same-origin
+// requests and "null" for cross-origin ones.
+func browserFormOrigin(t *testing.T, policy, pageURL, targetURL string) string {
+	t.Helper()
+	pu, _ := url.Parse(pageURL)
+	tu, _ := url.Parse(targetURL)
+	switch policy {
+	case "no-referrer":
+		return "null"
+	case "same-origin":
+		if pu.Scheme == tu.Scheme && strings.EqualFold(pu.Host, tu.Host) {
+			return pu.Scheme + "://" + pu.Host
+		}
+		return "null"
+	}
+	t.Fatalf("browserFormOrigin: policy %q not modelled", policy)
+	return ""
+}
+
+// Regression: /admin used to send Referrer-Policy: no-referrer, so browsers
+// sent "Origin: null" on the login form POST and adminHTML answered 403
+// "cross-origin request rejected": nobody could log in from a browser.
+// "Origin: null" must stay rejected; the page's own policy must make the
+// browser send its real origin.
+func TestAdminLoginBrowserOrigin(t *testing.T) {
+	e := newEnv(t)
+	c := adminClient(t)
+	page := e.srv.URL + "/admin"
+	login := e.srv.URL + "/admin/login"
+
+	// What the old header made browsers send: still rejected.
+	o := browserFormOrigin(t, "no-referrer", page, login)
+	res, body := postForm(t, c, login, url.Values{"token": {adminToken}}, "Origin", o)
+	if res.StatusCode != 403 || !strings.Contains(body, "cross-origin request rejected") {
+		t.Fatalf("Origin %q: %d %q", o, res.StatusCode, body)
+	}
+
+	// The policy /admin actually serves: the browser sends the real origin
+	// and the login handler runs (wrong token -> login error page, right
+	// token -> session + redirect).
+	res, _ = getPage(t, c, page)
+	policy := res.Header.Get("Referrer-Policy")
+	o = browserFormOrigin(t, policy, page, login)
+	if o == "null" {
+		t.Fatalf("Referrer-Policy %q makes browsers send Origin: null on the login POST", policy)
+	}
+	res, body = postForm(t, c, login, url.Values{"token": {"wrong"}}, "Origin", o)
+	if res.StatusCode != 401 || !strings.Contains(body, "Wrong admin token.") {
+		t.Fatalf("wrong token, Origin %q: %d", o, res.StatusCode)
+	}
+	res, _ = postForm(t, c, login, url.Values{"token": {adminToken}}, "Origin", o)
+	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != "/admin" {
+		t.Fatalf("right token, Origin %q: %d %s", o, res.StatusCode, res.Header.Get("Location"))
+	}
+	// A cross-site page under the same policy still yields "null" -> 403.
+	o = browserFormOrigin(t, policy, "https://evil.example/x", login)
+	if res, _ = postForm(t, adminClient(t), login, url.Values{"token": {adminToken}}, "Origin", o); res.StatusCode != 403 {
+		t.Fatalf("cross-site Origin %q: %d", o, res.StatusCode)
 	}
 }
 
